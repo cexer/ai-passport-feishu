@@ -21,10 +21,16 @@ typedef enum {
     FEISHU_BINDING_SLOW_DOWN,
     FEISHU_BINDING_EXPIRED,
     FEISHU_BINDING_FAILED,
+    FEISHU_BINDING_DENIED,
 } feishu_binding_status_t;
 
 bool feishu_binding_app_configured(void);
 esp_err_t feishu_binding_begin(feishu_binding_request_t *request);
+esp_err_t feishu_binding_begin_with_app(feishu_binding_request_t *request,
+                                        const feishu_credentials_t *app);
+esp_err_t feishu_binding_poll_candidate(const feishu_binding_request_t *request,
+    feishu_binding_status_t *status,feishu_credentials_t *credentials,
+    bool (*cancel)(void *),void *context);
 esp_err_t feishu_binding_poll(const feishu_binding_request_t *request,
                               feishu_binding_status_t *status,
                               feishu_credentials_t *credentials);

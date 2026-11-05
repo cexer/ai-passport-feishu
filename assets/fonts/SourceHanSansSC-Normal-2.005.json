@@ -1,0 +1,15 @@
+{
+  "family": "Source Han Sans SC Normal",
+  "version": "2.005",
+  "license": "SIL OFL 1.1",
+  "url": "https://raw.githubusercontent.com/adobe-fonts/source-han-sans/2.005R/OTF/SimplifiedChinese/SourceHanSansSC-Normal.otf",
+  "bytes": 16525388,
+  "sha256": "7e5b7e586262f5e187c3397935b3a0dfbe28e08a916be0f60ec7fee2b50abd6d",
+  "converter": "lv_font_conv 1.5.3",
+  "ranges": "0x20-0x7e,0x2000-0x206f,0x2713,0x3000-0x303f,0x4e00-0x9fff,0xff00-0xffef",
+  "codepoints": 21421,
+  "bpp": 4,
+  "size_px": 14,
+  "bitmap_bytes": 1737446,
+  "bitmap_storage": "read-only mapped partition feishu_font at 0x500000"
+}

@@ -1,0 +1,41 @@
+{
+  "origin": "local FlashDB fork, version 2.2.99; NOT pristine upstream",
+  "license": "Apache-2.0",
+  "source_snapshot": {
+    "fdb.c": "9e860cd2fbfdcbc635af5083de4284a89701d4ef683effc96d04a6c63c74f3ce",
+    "fdb_kvdb.c": "4a61526cf91c87e2b442facb89cf07598589949b10d54f5aaca67a2595e64750",
+    "fdb_utils.c": "317e0139625d6e608df865bbe09fdee5d4b37fed2fa77579ab77ff27a9d827b4",
+    "fdb_read_cache.c": "55acececb8bfdd01a02d7652c0dbdd1c34ef92ac16267ed51b2eeece91e532aa",
+    "fdb_def.h": "82586a315fdd544508241e8dcb86307eac6655fbb4b0b44f6dcc9adaee636e78",
+    "fdb_low_lvl.h": "f3f1b5ff4a862475247a0a8dd3af57f7276c4fe4d5bf339ad76f4f4bba2b6365",
+    "flashdb.h": "836e380631dad32abf7e9b56aa69696c7719e21387610e6ddcb3f2b14f8dae33",
+    "fal.h": "cdfc0e3b90656ac45d428e369397fed15347e9ea44f19213343ca7f1790a44b7",
+    "fal_def.h": "4fa6835cd80aab2fd59ab801c665ce3e208c5e532dbc1d778f363c6b404ae97f"
+  },
+  "changes": [
+    "1 KiB transient read window; operation remains valid when optional allocation is denied",
+    "Firmware enables 1 KiB name filter; 128-entry exact-name positive cache with aging",
+    "192-byte compact sector state and verified-tail directory; header queries never scan payload",
+    "256-byte CRC reads and 512-byte GC record copy; periodic scheduler yielding in physical port",
+    "Sticky exact-length raw IO failure prevents further mutations until reopen",
+    "GC source erase permitted only after all live records copy successfully",
+    "Interrupted EMPTY-header repair only for an entirely erased payload alongside a recognized sector",
+    "Unknown or occupied medium never automatically formatted; fresh setup never imports legacy credentials",
+    "Opaque serialized KV API with shared object/catalog and independent mirrored root adapters",
+    "Optional caches denied, CRC16 collisions, admission read bound and 64 interrupted full-GC writes tested",
+    "Local fork maintained independently; not pristine upstream FlashDB; logs omit private keys"
+  ],
+  "current_source_sha256": {
+    "vendor\\fal.h": "cdfc0e3b90656ac45d428e369397fed15347e9ea44f19213343ca7f1790a44b7",
+    "vendor\\fal_cfg.h": "257c61045f83914e6771b47ddce9dacfecae66b8377bf382f2392cec4b8df205",
+    "vendor\\fal_def.h": "4fa6835cd80aab2fd59ab801c665ce3e208c5e532dbc1d778f363c6b404ae97f",
+    "vendor\\fdb.c": "9e860cd2fbfdcbc635af5083de4284a89701d4ef683effc96d04a6c63c74f3ce",
+    "vendor\\fdb_cfg.h": "bc562ec982c5330dba85c738e9692ec384b03f69c4bed754d522246bbd1194c9",
+    "vendor\\fdb_def.h": "0db52289b8d7c76940684a05c086d306a6fad280848c445baf3940187e8dc362",
+    "vendor\\fdb_kvdb.c": "963e0a6c7c9b15680b3f8e51f50632f140207643cad4849c56ef3135a56b6f4f",
+    "vendor\\fdb_low_lvl.h": "c93f7f974c645b961805051d2836b240e68b23015927e402099f7277ddf1847c",
+    "vendor\\fdb_read_cache.c": "55acececb8bfdd01a02d7652c0dbdd1c34ef92ac16267ed51b2eeece91e532aa",
+    "vendor\\fdb_utils.c": "27e90c3aa7157b7f6bc392fc026951f84b1d1444e6ef59a88143cec122b24088",
+    "vendor\\flashdb.h": "836e380631dad32abf7e9b56aa69696c7719e21387610e6ddcb3f2b14f8dae33"
+  }
+}

@@ -166,10 +166,7 @@ static esp_err_t root_get(httpd_req_t *request)
         "border-radius:10px}button{background:#3370ff;color:white;border:0;font-weight:700;margin-top:24px}"
         ".tip{color:#666;line-height:1.55}.prep{background:#eef4ff;padding:12px;border-radius:10px;line-height:1.55}"
         "</style></head><body><div class=card><h1>完成设备首次设置</h1>"
-        "<p class=prep><b>填写前请准备自己的飞书应用：</b><br>1. 在飞书开放平台创建企业自建应用；"
-        "<br>2. 开通设备所需权限并发布；<br>3. 确保当前飞书账号在应用可用范围；"
-        "<br>4. 在“凭证与基础信息”复制 App ID 和 App Secret。</p>"
-        "<p class=tip>飞书 App ID 和 App Secret 为必填。应用凭据只从手机发给当前设备。</p>"
+        "<p class=tip>这里只配置 Wi-Fi。联网后，在设备上用飞书扫码选择或创建应用，无需填写应用密钥。</p>"
         "<form method=post action=/configure><label>Wi-Fi 网络</label><select name=ssid required>");
     for (uint16_t i = 0; i < s_network_count && used < 6500; ++i) {
         char escaped[160];
@@ -180,10 +177,7 @@ static esp_err_t root_get(httpd_req_t *request)
     }
     snprintf(page + used, 7168 - used,
         "</select><label>Wi-Fi 密码</label><input name=password type=password maxlength=64 "
-        "autocomplete=current-password><label>飞书 App ID</label>"
-        "<input name=app_id required maxlength=63 placeholder=cli_... autocomplete=off>"
-        "<label>飞书 App Secret</label><input name=app_secret type=password required maxlength=127 "
-        "autocomplete=new-password><button type=submit>保存并继续</button></form></div></body></html>");
+        "autocomplete=current-password><button type=submit>保存并继续</button></form></div></body></html>");
     httpd_resp_set_type(request, "text/html; charset=utf-8");
     esp_err_t err = httpd_resp_send(request, page, HTTPD_RESP_USE_STRLEN);
     free(page);
@@ -316,18 +310,12 @@ static esp_err_t configure_post(httpd_req_t *request)
         return ESP_FAIL;
     }
     url_decode_field(body, "password", password, sizeof(password));
-    esp_err_t err = save_feishu_form(body);
-    if (err != ESP_OK) {
-        memset(password, 0, sizeof(password));
-        memset(body, 0, sizeof(body));
-        httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
-                            "Feishu App ID or App Secret is invalid");
-        return err;
-    }
+    esp_err_t err;
     memcpy(config.sta.ssid, ssid, strlen(ssid));
     memcpy(config.sta.password, password, strlen(password));
     config.sta.threshold.authmode = WIFI_AUTH_OPEN;
-    err = esp_wifi_set_config(WIFI_IF_STA, &config);
+    err = feishu_store_save_wifi(&config,sizeof(config));
+    if(err==ESP_OK)err = esp_wifi_set_config(WIFI_IF_STA, &config);
     memset(password, 0, sizeof(password));
     memset(body, 0, sizeof(body));
     if (err != ESP_OK) {
@@ -338,8 +326,8 @@ static esp_err_t configure_post(httpd_req_t *request)
     httpd_resp_set_type(request, "text/html; charset=utf-8");
     httpd_resp_send(request,
         "<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
-        "<meta charset=utf-8><h2>Wi-Fi 和飞书应用已保存</h2>"
-        "<p>请回到设备，接下来用飞书扫描授权二维码。</p>",
+        "<meta charset=utf-8><h2>Wi-Fi 已保存</h2>"
+        "<p>请回到设备，用飞书扫码选择或创建应用，然后确认用户数据授权。</p>",
         HTTPD_RESP_USE_STRLEN);
     s_received = true;
     return ESP_OK;
@@ -401,13 +389,14 @@ static esp_err_t portal_start(setup_portal_info_t *info, portal_mode_t mode)
     memcpy(config.ap.ssid, info->ssid, strlen(info->ssid));
     config.ap.ssid_len = strlen(info->ssid);
     config.ap.channel = 1;
-    // Both first-run Wi-Fi setup and app-only recovery carry secrets. Protect
-    // every local form with a fresh password embedded only in the screen QR.
-    random_password(info->password);
-    memcpy(config.ap.password, info->password, strlen(info->password));
-    config.ap.authmode = WIFI_AUTH_WPA2_PSK;
+    config.ap.authmode = WIFI_AUTH_OPEN;
+    if (mode == PORTAL_FEISHU) {
+        random_password(info->password);
+        memcpy(config.ap.password, info->password, strlen(info->password));
+        config.ap.authmode = WIFI_AUTH_WPA2_PSK;
+    }
     config.ap.max_connection = 4;
-    err = esp_wifi_set_storage(WIFI_STORAGE_FLASH);
+    err = esp_wifi_set_storage(WIFI_STORAGE_RAM);
     if (err == ESP_OK) err = esp_wifi_set_mode(WIFI_MODE_APSTA);
     if (err == ESP_OK) err = esp_wifi_set_config(WIFI_IF_AP, &config);
     if (err == ESP_OK) err = esp_wifi_start();
@@ -415,6 +404,13 @@ static esp_err_t portal_start(setup_portal_info_t *info, portal_mode_t mode)
         setup_portal_stop();
         return err;
     }
+    err = esp_wifi_get_config(WIFI_IF_AP, &config);
+    if (err != ESP_OK || (mode == PORTAL_WIFI &&
+            (config.ap.authmode != WIFI_AUTH_OPEN || config.ap.password[0] != 0))) {
+        setup_portal_stop();
+        return err != ESP_OK ? err : ESP_FAIL;
+    }
+    ESP_LOGI(TAG, "setup AP authentication=%u", (unsigned)config.ap.authmode);
     if (mode == PORTAL_WIFI) {
         wifi_scan_config_t scan = { .show_hidden = false };
         if (esp_wifi_scan_start(&scan, true) == ESP_OK) {
@@ -423,8 +419,23 @@ static esp_err_t portal_start(setup_portal_info_t *info, portal_mode_t mode)
         } else {
             s_network_count = 0;
         }
+        // Physical RF diagnostics without logging SSIDs, BSSIDs or passwords.
+        wifi_config_t saved = {0};
+        esp_err_t stored = feishu_store_load_wifi(&saved,sizeof(saved));
+        size_t target_length = strnlen((const char *)saved.sta.ssid,32);
+        unsigned matches = 0;int best_rssi = -127;
+        for(unsigned i=0;stored==ESP_OK && target_length && i<s_network_count;++i) {
+            if(strnlen((const char *)s_networks[i].ssid,33)==target_length &&
+               !memcmp(s_networks[i].ssid,saved.sta.ssid,target_length)) {
+                ++matches;if(s_networks[i].rssi>best_rssi)best_rssi=s_networks[i].rssi;
+            }
+        }
+        memset(&saved,0,sizeof(saved));
+        ESP_LOGI(TAG,"scan: visible=%u target_matches=%u best_rssi=%d config=%s",
+                 (unsigned)s_network_count,matches,best_rssi,esp_err_to_name(stored));
     }
     snprintf(info->address, sizeof(info->address), "192.168.4.1");
+    http_config.stack_size = 8192;
     http_config.lru_purge_enable = true;
     http_config.max_open_sockets = 5;
     if (httpd_start(&s_http, &http_config) != ESP_OK) {

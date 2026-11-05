@@ -18,6 +18,8 @@ Use this page to discover repository documentation. `authoritative` documents de
 | [development/agent-guide.md](development/agent-guide.md) | AI-assisted development workflow | authoritative |
 | [development/environment-setup.md](development/environment-setup.md) | Clean-machine environment bootstrap for AI agents | authoritative |
 | [development/build-and-test.md](development/build-and-test.md) | Build and validation commands | authoritative |
+| [development/feishu-validation.md](development/feishu-validation.md) | Reliability and simulator/device acceptance boundary | reference |
+| [development/storage-optimization.md](development/storage-optimization.md) | Overall experience optimization plan and backend qualification checkpoint | reference |
 | [development/feishu-owner-provisioning.md](development/feishu-owner-provisioning.md) | Web Serial and USB setup for an owner-provided Feishu application | authoritative |
 | [development/coding-conventions.md](development/coding-conventions.md) | C and firmware conventions | authoritative |
 | [development/CI-validation.md](development/CI-validation.md) | Pull-request and main-branch validation | authoritative |

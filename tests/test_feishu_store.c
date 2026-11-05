@@ -1,0 +1,110 @@
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+#include "feishu_store.h"
+#include "nvs.h"
+static char directory[128];
+#define FEISHU_STORE_DIRECTORY directory
+/* Reset the translation unit's RAM-only migration flag to model process reboot;
+ * file operations, serialization and account-epoch checks are production code. */
+#include "../main/feishu_store.c"
+
+static unsigned lock_depth,imports,cleanups;
+static uint64_t random_counter=10;
+static feishu_credentials_t legacy;
+static char legacy_access[FEISHU_TOKEN_MAX];
+void esp_fill_random(void *data,size_t size)
+{ assert(size==8);++random_counter;memcpy(data,&random_counter,8); }
+esp_err_t feishu_cache_pool_lock(void) {++lock_depth;return ESP_OK;}
+void feishu_cache_pool_unlock(void) {assert(lock_depth);--lock_depth;}
+esp_err_t feishu_cache_release_space(void) {return ESP_FAIL;}
+esp_err_t feishu_legacy_load_app_credentials(feishu_credentials_t *c)
+{ ++imports;*c=legacy;c->refresh_token[0]=0;return ESP_OK; }
+esp_err_t feishu_legacy_load_credentials(feishu_credentials_t *c) {*c=legacy;return ESP_OK;}
+esp_err_t feishu_legacy_load_access_token(char *t,size_t n)
+{ assert(n>strlen(legacy_access));strcpy(t,legacy_access);return ESP_OK; }
+esp_err_t feishu_legacy_load_cache_owner(char *o,size_t n)
+{ assert(n>strlen("ou_fake_old"));strcpy(o,"ou_fake_old");return ESP_OK; }
+esp_err_t feishu_legacy_load_seen(feishu_seen_t *seen,size_t n,size_t *count)
+{ assert(n);strcpy(seen[0].chat_id,"oc_fake");seen[0].last_seen_time_ms=12;*count=1;return ESP_OK; }
+bool feishu_legacy_wifi_setup_required(void) {return true;}
+/* Pretend cleanup failed: the migration marker must still prevent resurrection. */
+esp_err_t feishu_legacy_cleanup(void) {++cleanups;return ESP_FAIL;}
+
+int main(int argc,char **argv)
+{
+    assert(argc==2 && strlen(argv[1])<sizeof(directory));strcpy(directory,argv[1]);
+    strcpy(legacy.app_id,"cli_fake_old");strcpy(legacy.app_secret,"fake-secret");
+    memset(legacy.refresh_token,'R',7500);legacy.refresh_token[7500]=0;
+    memset(legacy_access,'A',7500);legacy_access[7500]=0;
+    feishu_credentials_t c;char token[FEISHU_TOKEN_MAX],owner[64];
+    assert(!feishu_store_load_credentials(&c));assert(!memcmp(&c,&legacy,sizeof(c)));
+    assert(!feishu_store_load_access_token(token,sizeof(token)) && !strcmp(token,legacy_access));
+    assert(!feishu_store_load_cache_owner(owner,sizeof(owner)) && !strcmp(owner,"ou_fake_old"));
+    assert(imports==1 && cleanups==1 && !lock_depth);
+    assert(feishu_store_wifi_setup_required());
+    unsigned auth_request=99;
+    assert(!feishu_store_get_auth_request(&auth_request) && auth_request==FEISHU_AUTH_NONE);
+    for(unsigned i=FEISHU_AUTH_REAUTHORIZE;i<=FEISHU_AUTH_REPAIR_APP;++i) {
+        assert(!feishu_store_request_auth(i));migrated=false;
+        assert(!feishu_store_get_auth_request(&auth_request) && auth_request==i);
+        assert(!feishu_store_load_credentials(&c) && !memcmp(&c,&legacy,sizeof(c)));
+    }
+    assert(feishu_store_request_auth(99)==ESP_ERR_INVALID_ARG);
+    assert(!feishu_store_request_auth(FEISHU_AUTH_NONE));
+    unsigned char wifi[108],got_wifi[108];memset(wifi,0,sizeof(wifi));memcpy(wifi,"fake-ssid",9);
+    assert(!feishu_store_save_wifi(wifi,sizeof(wifi)));
+    migrated=false;
+    assert(!feishu_store_load_credentials(&c));assert(!memcmp(&c,&legacy,sizeof(c)));
+    assert(imports==1 && cleanups==1);
+    assert(!feishu_store_load_wifi(got_wifi,sizeof(got_wifi)) && !memcmp(wifi,got_wifi,sizeof(wifi)));
+    puts("store large legacy import, marker/reboot and shared Wi-Fi record: PASS");
+    char voice[FEISHU_VOICE_COOKIE_MAX];
+    assert(feishu_store_load_voice_cookie(voice,sizeof(voice))==ESP_ERR_NVS_NOT_FOUND);
+    assert(!feishu_store_save_voice_cookie("session=fake; session_list=fake-list"));
+    migrated=false;
+    assert(!feishu_store_load_voice_cookie(voice,sizeof(voice)) && !strcmp(voice,"session=fake; session_list=fake-list"));
+    assert(feishu_store_save_voice_cookie("session=fake\r\nx-header: injected")==ESP_ERR_INVALID_ARG);
+    assert(feishu_store_save_voice_cookie("unrelated=fake")==ESP_ERR_INVALID_ARG);
+    memset(voice,'A',sizeof(voice)-1);voice[sizeof(voice)-1]=0;memcpy(voice,"session=",8);
+    assert(!feishu_store_save_voice_cookie(voice));
+    assert(!feishu_store_load_voice_cookie(token,sizeof(token)) && strlen(token)==4096);
+    assert(feishu_store_load_voice_cookie(owner,sizeof(owner))==ESP_ERR_NVS_NOT_FOUND && !owner[0]);
+
+    strcpy(c.app_id,"cli_fake_new");strcpy(c.app_secret,"new-secret");
+    assert(!feishu_store_save_app_credentials(&c));
+    assert(feishu_store_load_voice_cookie(voice,sizeof(voice))==ESP_ERR_NVS_NOT_FOUND && !voice[0]);
+    assert(feishu_store_load_credentials(&c)==ESP_ERR_NVS_NOT_FOUND);
+    assert(!strcmp(c.app_id,"cli_fake_new"));
+    assert(feishu_store_load_access_token(token,sizeof(token))==ESP_ERR_NVS_NOT_FOUND && !token[0]);
+    assert(feishu_store_load_cache_owner(owner,sizeof(owner))==ESP_ERR_NVS_NOT_FOUND);
+    strcpy(c.refresh_token,"fake-new-refresh");assert(!feishu_store_save_credentials(&c));
+    assert(!feishu_store_save_access_token("fake-new-access"));
+    assert(!feishu_store_save_cache_owner("ou_fake_new"));
+    memset(token,'T',8000);token[8000]=0;
+    assert(!feishu_store_save_refresh_token(token));
+    assert(!feishu_store_load_credentials(&c) && !strcmp(c.refresh_token,token));
+    assert(!feishu_store_load_access_token(token,sizeof(token)) && !strcmp(token,"fake-new-access"));
+    assert(!feishu_store_clear_user_tokens());migrated=false;
+    assert(feishu_store_load_credentials(&c)==ESP_ERR_NVS_NOT_FOUND);
+    assert(!strcmp(c.app_id,"cli_fake_new") && !strcmp(c.app_secret,"new-secret"));
+    assert(feishu_store_load_access_token(token,sizeof(token))==ESP_ERR_NVS_NOT_FOUND);
+    assert(feishu_store_load_cache_owner(owner,sizeof(owner))==ESP_ERR_NVS_NOT_FOUND);
+    assert(!feishu_store_load_wifi(got_wifi,sizeof(got_wifi)) && !memcmp(wifi,got_wifi,sizeof(wifi)));
+    puts("store binding changes isolate tokens; rotation and revocation preserve required settings: PASS");
+
+    feishu_seen_t seen[FEISHU_MAX_CHATS];size_t count=0;
+    assert(!feishu_store_mark_seen("oc_fake",30));assert(!feishu_store_mark_seen("oc_fake",20));
+    assert(!feishu_store_load_seen(seen,FEISHU_MAX_CHATS,&count));
+    assert(count==1 && seen[0].last_seen_time_ms==30);
+    assert(!feishu_store_clear_credentials());migrated=false;
+    assert(feishu_store_load_app_credentials(&c)==ESP_ERR_NVS_NOT_FOUND);
+    assert(imports==1 && !lock_depth);
+    /* Corrupting the disposable DB cannot block recovery configuration reads. */
+    char path[160];snprintf(path,sizeof(path),"%s/objects.db",directory);
+    FILE *f=fopen(path,"wb");assert(f);fputs("not-a-database",f);fclose(f);
+    assert(!feishu_store_load_wifi(got_wifi,sizeof(got_wifi)) && !memcmp(wifi,got_wifi,sizeof(wifi)));
+    assert(!feishu_store_require_wifi_setup(false));assert(!feishu_store_wifi_setup_required());
+    puts("store seen monotonicity, no legacy resurrection and database-independent recovery: PASS");
+    return 0;
+}

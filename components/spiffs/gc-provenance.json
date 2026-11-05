@@ -1,0 +1,7 @@
+{
+  "baseline": "ESP-IDF 5.5.3 bundled SPIFFS",
+  "original_gc_sha256": "74eeeb674469a5e5e98fef11b86b39ddafba7d94125de6103b881cb87eca7516",
+  "scope": "candidate selection only; no on-flash format or ordering change",
+  "scratch_bytes_max": 90,
+  "pressure_threshold_usable_pages": 128
+}

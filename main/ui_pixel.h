@@ -13,7 +13,7 @@
 #define UI_RED        0xE43B2F
 #define UI_MUTED      0xD9E7EC
 
-// 1-bit device font: ASCII, Chinese punctuation, and U+4E00-U+9FFF.
+// 4-bit grayscale device font: ASCII, Chinese punctuation, and U+4E00-U+9FFF.
 // The bitmap stays in Flash; LVGL only reads glyph data while rendering.
 extern const lv_font_t lv_font_ai_passport_14;
 

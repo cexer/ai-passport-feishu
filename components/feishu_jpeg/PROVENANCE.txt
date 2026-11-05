@@ -1,0 +1,9 @@
+TJpgDec R0.03 by ChaN, 2021, unmodified tjpgd.c; tjpgd.h uses stdint.h on modern Windows too.
+Source: https://elm-chan.org/fsw/tjpgd/arc/tjpgd3.zip
+Archive SHA-256: 052fe3efbc9a8be29f31597ad009c5b51a4f6905878eb28569e0ab3d46d0c013
+tjpgd.c SHA-256: 3a0091b6e1e6407f18633c17c19b5791b878d3ede4282005222bc41050e347a9
+Original tjpgd.h SHA-256: 12d7b17c55929224d878b2b801750e32d437ce58c89bc87bd3f5c6d4151337a2
+Local config: RGB565, native descaling enabled, FASTDECODE=1.
+Private symbol prefix is applied through compiler definitions.
+The published 2023 patch is for grayscale output; this build emits RGB565.
+feishu_jpeg.c is the application adapter and bounded viewport/row-strip logic.

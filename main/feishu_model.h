@@ -38,9 +38,14 @@ typedef struct {
     char sender_name[FEISHU_SENDER_NAME_MAX];
     char text[FEISHU_TEXT_MAX];
     uint64_t create_time_ms;
+    int64_t text_object_id;
+    uint64_t text_length;
     feishu_message_type_t type;
     bool mine;
     bool deleted;
+    bool text_unavailable;
+    bool text_truncated;
+    bool text_mapped;
 } feishu_message_t;
 
 typedef struct {
@@ -60,6 +65,9 @@ typedef enum {
     FEISHU_PAGE_IMAGE,
     FEISHU_PAGE_SETTINGS,
     FEISHU_PAGE_CONFIRM,
+    FEISHU_PAGE_DRAFT_ACTIONS,
+    FEISHU_PAGE_IMAGE_ACTIONS,
+    FEISHU_PAGE_DRAFTS,
 } feishu_page_t;
 
 typedef enum {
@@ -80,7 +88,13 @@ typedef enum {
     FEISHU_NAV_CANCEL_REPLY,
     FEISHU_NAV_RESET_WIFI,
     FEISHU_NAV_UNBIND,
+    FEISHU_NAV_IMAGE_ZOOM_IN,
+    FEISHU_NAV_IMAGE_ZOOM_OUT,
+    FEISHU_NAV_IMAGE_AXIS,
     FEISHU_NAV_EXIT,
+    FEISHU_NAV_LIST_DRAFTS,
+    FEISHU_NAV_OPEN_DRAFT,
+    FEISHU_NAV_REAUTHORIZE,
 } feishu_nav_action_t;
 
 typedef struct {
@@ -93,6 +107,8 @@ typedef struct {
     bool reply_to_message;
     size_t settings_index;
     size_t confirm_action;
+    size_t draft_index,draft_count;
+    bool draft_manager;
 } feishu_nav_t;
 
 uint32_t feishu_unread_count(const feishu_message_t *messages, size_t count,
@@ -102,3 +118,9 @@ uint64_t feishu_latest_visible_time(const feishu_message_t *messages,
 size_t feishu_utf8_copy(char *dst, size_t dst_size, const char *src);
 feishu_nav_action_t feishu_nav_handle(feishu_nav_t *nav,
                                       feishu_nav_event_t event);
+
+/* Normalize whitespace and wrap a bounded UTF-8 prefix in display cells. */
+size_t feishu_text_preview(char *dst,size_t capacity,const char *src,bool truncated,unsigned cells,unsigned lines);
+
+/* Avatar initials skip punctuation; ASCII pairs or one supported CJK glyph. */
+void feishu_avatar_text(char output[5],const char *text,const char *fallback);

@@ -11,10 +11,7 @@
     "https://accounts.feishu.cn/oauth/v1/device_authorization"
 #define FEISHU_DEVICE_TOKEN_URL \
     "https://open.feishu.cn/open-apis/authen/v2/oauth/token"
-#define FEISHU_PRODUCT_SCOPES \
-    "im:chat:readonly im:message im:message.p2p_msg:get_as_user " \
-    "im:message.group_msg:get_as_user im:message.send_as_user " \
-    "speech_to_text:speech offline_access"
+#include "feishu_registration_config.h"
 
 static const char *TAG = "feishu_binding";
 static char *s_pending_access_token;
@@ -113,7 +110,8 @@ bool feishu_binding_app_configured(void)
     return configured;
 }
 
-esp_err_t feishu_binding_begin(feishu_binding_request_t *request)
+esp_err_t feishu_binding_begin_with_app(feishu_binding_request_t *request,
+                                        const feishu_credentials_t *app)
 {
     feishu_http_response_t response = { 0 };
     cJSON *root = NULL;
@@ -124,17 +122,17 @@ esp_err_t feishu_binding_begin(feishu_binding_request_t *request)
     esp_err_t err;
 
     if (request == NULL) return ESP_ERR_INVALID_ARG;
-    credentials = calloc(1, sizeof(*credentials));
-    if (credentials == NULL) return ESP_ERR_NO_MEM;
-    if (feishu_store_load_app_credentials(credentials) != ESP_OK) {
-        free(credentials);
-        return ESP_ERR_INVALID_STATE;
+    if(app==NULL) {
+        credentials = calloc(1, sizeof(*credentials));
+        if (credentials == NULL) return ESP_ERR_NO_MEM;
+        esp_err_t loaded=feishu_store_load_app_credentials(credentials);
+        if(loaded!=ESP_OK) {memset(credentials,0,sizeof(*credentials));free(credentials);return loaded;}
+        app=credentials;
     }
     clear_pending_access_token();
     memset(request, 0, sizeof(*request));
-    body = request_body(credentials, NULL);
-    memset(credentials, 0, sizeof(*credentials));
-    free(credentials);
+    body = request_body(app, NULL);
+    if(credentials) {memset(credentials,0,sizeof(*credentials));free(credentials);}
     if (body == NULL) return ESP_ERR_NO_MEM;
     err = feishu_http_request(HTTP_METHOD_POST, FEISHU_DEVICE_AUTH_URL, NULL,
                               body, 4096, &response);
@@ -185,9 +183,10 @@ done:
     return err;
 }
 
-esp_err_t feishu_binding_poll(const feishu_binding_request_t *request,
+static esp_err_t binding_poll(const feishu_binding_request_t *request,
                               feishu_binding_status_t *status,
-                              feishu_credentials_t *credentials)
+                              feishu_credentials_t *credentials, bool candidate,
+                              bool (*cancel)(void *),void *context)
 {
     char *body;
     char oauth_error[64] = { 0 };
@@ -202,7 +201,7 @@ esp_err_t feishu_binding_poll(const feishu_binding_request_t *request,
     credentials->refresh_token[0] = '\0';
     access_token = calloc(1, FEISHU_TOKEN_MAX);
     if (access_token == NULL) return ESP_ERR_NO_MEM;
-    if (feishu_store_load_app_credentials(credentials) != ESP_OK) {
+    if (!candidate && feishu_store_load_app_credentials(credentials) != ESP_OK) {
         memset(access_token, 0, FEISHU_TOKEN_MAX);
         free(access_token);
         return ESP_ERR_INVALID_STATE;
@@ -231,6 +230,11 @@ esp_err_t feishu_binding_poll(const feishu_binding_request_t *request,
             memset(access_token, 0, FEISHU_TOKEN_MAX);
             free(access_token);
             return ESP_ERR_INVALID_RESPONSE;
+        }
+        if(cancel && cancel(context)) {
+            memset(access_token,0,FEISHU_TOKEN_MAX);free(access_token);
+            memset(credentials->refresh_token,0,sizeof(credentials->refresh_token));
+            return FEISHU_HTTP_ERR_CANCELLED;
         }
         err = feishu_store_save_credentials(credentials);
         if (err == ESP_OK) {
@@ -261,6 +265,10 @@ esp_err_t feishu_binding_poll(const feishu_binding_request_t *request,
                    strcmp(oauth_error, "expired_device_code") == 0) {
             *status = FEISHU_BINDING_EXPIRED;
             err = ESP_OK;
+        } else if (strcmp(oauth_error,"access_denied")==0) {
+            *status=FEISHU_BINDING_DENIED;err=ESP_OK;
+        } else if (strcmp(oauth_error,"invalid_client")==0) {
+            err=ESP_ERR_INVALID_ARG;
         } else {
             // OAuth error identifiers are public protocol values and safe to
             // log; tokens, device codes and response bodies remain redacted.
@@ -276,3 +284,10 @@ esp_err_t feishu_binding_poll(const feishu_binding_request_t *request,
     free(access_token);
     return err;
 }
+
+esp_err_t feishu_binding_begin(feishu_binding_request_t *request)
+{ return feishu_binding_begin_with_app(request,NULL); }
+esp_err_t feishu_binding_poll(const feishu_binding_request_t *request,feishu_binding_status_t *status,feishu_credentials_t *credentials)
+{ return binding_poll(request,status,credentials,false,NULL,NULL); }
+esp_err_t feishu_binding_poll_candidate(const feishu_binding_request_t *request,feishu_binding_status_t *status,feishu_credentials_t *credentials,bool (*cancel)(void *),void *context)
+{ return binding_poll(request,status,credentials,true,cancel,context); }

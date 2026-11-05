@@ -1,0 +1,4 @@
+Synthetic public fixtures generated with Pillow 12.3.0. No private or third-party image content.
+quadrants: 1024x768 red/green/blue/yellow blocks; small: 64x48.
+gray: 320x240 vertical gray gradient; odd: 257x409 vertical gradient.
+progressive: intentionally unsupported progressive encoding of the quadrants.

@@ -4,3 +4,11 @@ sdkconfig.old
 managed_components/
 .vscode/
 .idea/
+__pycache__/
+*.py[cod]
+node_modules/
+
+# Local firmware output and private device/chat captures
+/out/
+/lark-im-resources/
+*.dpapi

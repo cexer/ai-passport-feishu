@@ -1,6 +1,7 @@
 # Name,   Type, SubType, Offset,   Size,     Flags
 nvs,      data, nvs,     0x9000,   0x6000,
 phy_init, data, phy,     0xf000,   0x1000,
-factory,  app,  factory, 0x10000,  0x300000,
-feishu_cache, data, nvs,  0x310000,  0x10000,
-feishu_img, data, spiffs,  0x320000,  0x100000,
+factory,  app,  factory, 0x10000,  0x330000,
+feishu_cache, data, nvs,  0x360000,  0x10000,
+feishu_img, data, spiffs,  0x370000,  0x100000,
+feishu_font, data, 0x40, 0x500000, 0x200000, readonly
