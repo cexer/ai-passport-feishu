@@ -11,6 +11,7 @@
 #include "freertos/queue.h"
 #include "lvgl.h"
 #include "ui_pixel.h"
+#include "feishu_theme.h"
 #include <stdatomic.h>
 
 static const char *TAG = "main";
@@ -24,7 +25,12 @@ static atomic_bool s_key_overflow;
 static void onboarding_complete(void)
 {
     product_onboarding_exit();
+#ifdef FEISHU_NETWORK_DIAGNOSTIC
+    extern void feishu_network_probe_start(void);
+    feishu_network_probe_start();
+#else
     demo_feishu_enter();
+#endif
     s_onboarding = false;
     xQueueReset(s_keys);
 }
@@ -35,7 +41,7 @@ static void onboarding_complete(void)
 static void on_key(bsp_btn_t btn, bsp_btn_ev_t ev, void *user)
 {
     (void)user;
-    if(ev!=BSP_BTN_CLICK && ev!=BSP_BTN_LONG)return;
+    if(ev!=BSP_BTN_CLICK && ev!=BSP_BTN_LONG && !((btn==BSP_BTN_DOWN || btn==BSP_BTN_UP) && ev==BSP_BTN_DOUBLE))return;
     key_event_t key={(uint8_t)btn,(uint8_t)ev};
     if(s_keys && xQueueSend(s_keys,&key,0)!=pdTRUE)atomic_store(&s_key_overflow,true);
 }
@@ -48,6 +54,9 @@ static void dispatch_key(lv_timer_t *timer)
     }
     key_event_t key;if(xQueueReceive(s_keys,&key,0)!=pdTRUE)return;
     bsp_btn_t btn=(bsp_btn_t)key.button;bsp_btn_ev_t ev=(bsp_btn_ev_t)key.event;
+#ifdef FEISHU_NETWORK_DIAGNOSTIC
+    if(!s_onboarding)return;
+#endif
     if (s_onboarding) {
         product_onboarding_key(btn, ev);
     } else if (btn == BSP_BTN_OK && ev == BSP_BTN_LONG) {
@@ -85,11 +94,18 @@ void app_main(void)
         ESP_LOGE(TAG, "Display initialization failed");
         return;
     }
-    bsp_display_backlight(100);
+    if(bsp_lvgl_lock(1000)) {
+        lv_obj_set_style_bg_color(lv_screen_active(),lv_color_hex(FEISHU_BG),0);
+        lv_obj_set_style_bg_opa(lv_screen_active(),LV_OPA_COVER,0);
+        lv_obj_set_style_text_color(lv_screen_active(),lv_color_hex(FEISHU_TEXT),0);
+        bsp_lvgl_unlock();
+    }
+    bsp_display_backlight(70);
     s_keys=xQueueCreateStatic(16,sizeof(key_event_t),s_key_bytes,&s_key_storage);
     bool buttons_ok = bsp_button_init(on_key, NULL) == ESP_OK;
     // Audio DMA is acquired only while recording, not while browsing or TLS.
     bool battery_ok = bsp_battery_init() == ESP_OK;
+    int battery_percent=battery_ok ? bsp_battery_soc():-1;
     if (bsp_lvgl_lock(1000)) {
         if(!lv_timer_create(dispatch_key,20,NULL)) {
             buttons_ok=false;ESP_LOGE(TAG,"Input dispatch initialization failed");
@@ -103,7 +119,7 @@ void app_main(void)
             lv_obj_center(error);bsp_lvgl_unlock();return;
         }
         log_font_grayscale();
-        product_onboarding_enter(onboarding_complete);
+        product_onboarding_enter(onboarding_complete,battery_percent);
         bsp_lvgl_unlock();
     }
     ESP_LOGI(TAG, "Ready: Button=%d Audio=on-demand Battery=%d",

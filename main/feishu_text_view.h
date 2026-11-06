@@ -2,7 +2,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#define FEISHU_TEXT_PAGE_STEP 256u
+#define FEISHU_TEXT_PAGE_STEP 512u
 #define FEISHU_TEXT_PAGE_CAP (FEISHU_TEXT_PAGE_STEP+4u)
 
 /* raw starts at max(page*STEP-3,0), and includes the byte at the next boundary

@@ -53,12 +53,59 @@ int main(int argc,char **argv)
     assert(feishu_store_request_auth(99)==ESP_ERR_INVALID_ARG);
     assert(!feishu_store_request_auth(FEISHU_AUTH_NONE));
     unsigned char wifi[108],got_wifi[108];memset(wifi,0,sizeof(wifi));memcpy(wifi,"fake-ssid",9);
+    assert(!begin());assert(!save_value(ROOT_WIFI,wifi,sizeof(wifi)));assert(!end(ESP_OK));
     assert(!feishu_store_save_wifi(wifi,sizeof(wifi)));
     migrated=false;
     assert(!feishu_store_load_credentials(&c));assert(!memcmp(&c,&legacy,sizeof(c)));
     assert(imports==1 && cleanups==1);
     assert(!feishu_store_load_wifi(got_wifi,sizeof(got_wifi)) && !memcmp(wifi,got_wifi,sizeof(wifi)));
     puts("store large legacy import, marker/reboot and shared Wi-Fi record: PASS");
+    {
+        char names[FEISHU_WIFI_SAVED_MAX][33];size_t count,active;
+        assert(!feishu_store_list_wifi(names,&count,&active,sizeof(wifi)) && count==1 && active==0 && !strcmp(names[0],"fake-ssid"));
+        for(unsigned i=1;i<10;++i){memset(wifi,0,sizeof(wifi));snprintf((char *)wifi,32,"test-network-%u",i);memset(wifi+32,'a'+i,64);assert(!feishu_store_save_wifi(wifi,sizeof(wifi)));}
+        assert(!feishu_store_list_wifi(names,&count,&active,sizeof(wifi)) && count==10 && active==9);
+        memset(wifi,0,sizeof(wifi));memcpy(wifi,"eleventh-network",16);
+        assert(feishu_store_save_wifi(wifi,sizeof(wifi))==FEISHU_STORE_ERR_FULL);
+        assert(!feishu_store_load_wifi(got_wifi,sizeof(got_wifi)) && !strcmp((char *)got_wifi,"test-network-9"));
+        assert(!feishu_store_get_wifi(0,wifi,sizeof(wifi)) && !strcmp((char *)wifi,"fake-ssid"));
+        assert(!feishu_store_save_wifi(wifi,sizeof(wifi)));
+        migrated=false;
+        assert(!feishu_store_list_wifi(names,&count,&active,sizeof(wifi)) && count==10 && active==0);
+        assert(feishu_store_get_wifi(10,wifi,sizeof(wifi))==ESP_ERR_INVALID_ARG);
+        assert(!feishu_store_get_wifi(0,wifi,sizeof(wifi)));
+        unsigned char original[108];size_t total=0;
+        assert(!begin());assert(!read_part(ROOT_WIFI,0,original,sizeof(original),&total));assert(!end(ESP_OK));
+        assert(total==sizeof(original) && !memcmp(original,wifi,sizeof(wifi)));
+        unsigned char book[FEISHU_WIFI_BOOK_MAX],corrupt[FEISHU_WIFI_BOOK_MAX];
+        assert(!begin());assert(!read_part(ROOT_WIFI_BOOK,0,NULL,0,&total));assert(total<=sizeof(book));assert(!read_part(ROOT_WIFI_BOOK,0,book,total,&total));assert(!end(ESP_OK));
+        memcpy(corrupt,book,total);((feishu_wifi_book_header_t *)corrupt)->count=11;
+        assert(!begin());assert(!save_value(ROOT_WIFI_BOOK,corrupt,total));assert(!end(ESP_OK));
+        assert(feishu_store_load_wifi(got_wifi,sizeof(got_wifi))==FEISHU_STORE_ERR_CORRUPT);
+        assert(feishu_store_save_wifi(wifi,sizeof(wifi))==FEISHU_STORE_ERR_CORRUPT);
+        assert(!begin());assert(!save_value(ROOT_WIFI_BOOK,book,total));assert(!end(ESP_OK));
+        assert(!feishu_store_load_wifi(got_wifi,sizeof(got_wifi)) && !memcmp(wifi,got_wifi,sizeof(wifi)));
+        assert(!feishu_store_get_wifi(9,got_wifi,sizeof(got_wifi)));
+        memcpy(got_wifi+32,"changed-password",16);
+        assert(!feishu_store_update_wifi(9,got_wifi,sizeof(got_wifi)));
+        assert(!feishu_store_list_wifi(names,&count,&active,sizeof(wifi)) && active==0 && count==10);
+        got_wifi[0]='X';assert(feishu_store_update_wifi(9,got_wifi,sizeof(got_wifi))==ESP_ERR_INVALID_ARG);
+        assert(feishu_store_remove_wifi(10,sizeof(wifi))==ESP_ERR_INVALID_ARG);
+        assert(!feishu_store_remove_wifi(0,sizeof(wifi)));
+        assert(!feishu_store_list_wifi(names,&count,&active,sizeof(wifi)) && count==9 && active==0 && !strcmp(names[0],"test-network-1"));
+        assert(!feishu_store_save_wifi(wifi,sizeof(wifi)));
+        for(size_t remaining=10;remaining;--remaining) {
+            assert(!feishu_store_remove_wifi(remaining-1,sizeof(wifi)));
+            assert(!feishu_store_list_wifi(names,&count,&active,sizeof(wifi)) && count==remaining-1);
+        }
+        migrated=false;
+        assert(feishu_store_load_wifi(got_wifi,sizeof(got_wifi))==FEISHU_STORE_ERR_WIFI_EMPTY);
+        assert(!feishu_store_list_wifi(names,&count,&active,sizeof(wifi)) && !count);
+        assert(!feishu_store_save_wifi(wifi,sizeof(wifi)));
+        assert(!feishu_store_load_wifi(got_wifi,sizeof(got_wifi)) && !memcmp(wifi,got_wifi,sizeof(wifi)));
+        puts("Wi-Fi edit preserves active; forget all is explicit and cannot resurrect the legacy network; re-add PASS");
+        puts("Wi-Fi book: ten profiles, full preserves active, reselection/reopen and bounded index PASS");
+    }
     char voice[FEISHU_VOICE_COOKIE_MAX];
     assert(feishu_store_load_voice_cookie(voice,sizeof(voice))==ESP_ERR_NVS_NOT_FOUND);
     assert(!feishu_store_save_voice_cookie("session=fake; session_list=fake-list"));

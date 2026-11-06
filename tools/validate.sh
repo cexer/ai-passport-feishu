@@ -30,6 +30,13 @@ run_static_checks() {
         components/feishu_flashdb/vendor/fdb_utils.c components/feishu_flashdb/vendor/fdb_read_cache.c \
         -o "${fdb_test_dir}/test_feishu_fdb"
     "${fdb_test_dir}/test_feishu_fdb"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -D_CRT_SECURE_NO_WARNINGS -DFDB_USING_NAME_FILTER=1 \
+        -Icomponents/feishu_flashdb/include -Icomponents/feishu_flashdb/vendor \
+        tests/test_feishu_fdb_erase_interrupt.c components/feishu_flashdb/feishu_fdb.c \
+        components/feishu_flashdb/vendor/fdb.c components/feishu_flashdb/vendor/fdb_kvdb.c \
+        components/feishu_flashdb/vendor/fdb_utils.c components/feishu_flashdb/vendor/fdb_read_cache.c \
+        -o "${fdb_test_dir}/erase_interrupt"
+    "${fdb_test_dir}/erase_interrupt"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -D_CRT_SECURE_NO_WARNINGS \
         -DFDB_USING_NAME_FILTER=1 \
         '-DFDB_READ_CACHE_MALLOC(n)=((void)(n),(void*)0)' '-DFDB_READ_CACHE_FREE(p)=((void)(p))' \
@@ -61,6 +68,12 @@ run_static_checks() {
     "${CC:-cc}" "${fdb_flags[@]}" tests/test_feishu_data_flashdb_slots.c \
         "${fdb_sources[@]}" -o "${fdb_test_dir}/catalog_slots"
     "${fdb_test_dir}/catalog_slots"
+    "${CC:-cc}" "${fdb_flags[@]}" tests/test_feishu_data_flashdb_gc_batch.c \
+        "${fdb_sources[@]}" -o "${fdb_test_dir}/gc_batch"
+    "${fdb_test_dir}/gc_batch"
+    "${CC:-cc}" "${fdb_flags[@]}" tests/test_feishu_fdb_usage.c \
+        "${fdb_sources[@]}" -o "${fdb_test_dir}/usage"
+    "${fdb_test_dir}/usage"
     "${CC:-cc}" "${fdb_flags[@]}" tests/test_feishu_data_flashdb_text.c \
         main/feishu_text_map.c "${fdb_sources[@]}" -o "${fdb_test_dir}/text"
     "${fdb_test_dir}/text"
@@ -270,11 +283,31 @@ run_static_checks() {
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain tests/test_feishu_text_map.c \
         main/feishu_text_map.c -o "${test_dir}/test_feishu_text_map"
     "${test_dir}/test_feishu_text_map"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain tests/test_feishu_mcp_wire.c \
+        main/feishu_mcp_wire.c -o "${test_dir}/test_feishu_mcp_wire"
+    "${test_dir}/test_feishu_mcp_wire"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain tests/test_feishu_xiaozhi_audio.c \
+        main/feishu_xiaozhi_audio.c main/feishu_adpcm.c -o "${test_dir}/test_feishu_xiaozhi_audio"
+    "${test_dir}/test_feishu_xiaozhi_audio"
+    if [[ "${FEISHU_MCP_DIAGNOSTIC:-0}" == "1" ]]; then
+        "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -DJSONSL_NO_JPR -DJSONSL_STATE_GENERIC \
+            -Imain -Icomponents/jsonsl -I"${IDF_PATH}/components/json/cJSON" \
+            tests/test_feishu_mcp.c main/feishu_mcp.c main/feishu_json.c components/jsonsl/jsonsl.c \
+            "${IDF_PATH}/components/json/cJSON/cJSON.c" -o "${test_dir}/test_feishu_mcp"
+        "${test_dir}/test_feishu_mcp"
+    fi
     python3 -m unittest discover -s tests -p 'test_feishu_provision.py'
     python3 -m unittest discover -s tests -p 'test_firmware_layout.py'
     python3 -m unittest discover -s tests -p 'test_feishu_font.py'
     python3 -m unittest discover -s tests -p 'test_feishu_voice_login.py'
     rm -rf "${test_dir}"
+    local xiao_test_dir
+    xiao_test_dir="$(mktemp -d /tmp/ai-passport-xiao-tests.XXXXXX)"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -DJSONSL_NO_JPR -DJSONSL_STATE_GENERIC \
+        -Imain -Icomponents/jsonsl tests/test_feishu_xiaozhi_protocol.c main/feishu_xiaozhi_protocol.c \
+        main/feishu_json.c components/jsonsl/jsonsl.c -o "${xiao_test_dir}/test_xiao"
+    "${xiao_test_dir}/test_xiao"
+    rm -rf "${xiao_test_dir}"
     echo "Host tests: PASS"
 }
 

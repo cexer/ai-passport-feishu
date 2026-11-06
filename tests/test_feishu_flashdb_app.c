@@ -31,6 +31,16 @@ int main(void)
     assert(feishu_store_save_app_credentials(&credentials)==ESP_OK);
     uint8_t wifi[128];memset(wifi,0x51,sizeof(wifi));assert(feishu_store_save_wifi(wifi,sizeof(wifi))==ESP_OK);
     assert(feishu_store_require_wifi_setup(false)==ESP_OK);
+    /* A short configuration must load into a larger destination after reopen;
+     * the mirrored-root API requires exact slice sizes, unlike fread. */
+    const char xiao[]="{\"uuid\":\"fixture\",\"url\":\"wss://example.invalid/\",\"token\":\"fake-token\"}";
+    char config[FEISHU_XIAOZHI_CONFIG_MAX],small[8];
+    assert(feishu_store_load_xiaozhi(config,sizeof(config))==ESP_ERR_NVS_NOT_FOUND);
+    assert(feishu_store_save_xiaozhi(xiao)==ESP_OK);
+    memset(config,0x5a,sizeof(config));
+    assert(feishu_store_load_xiaozhi(config,sizeof(config))==ESP_OK && !strcmp(config,xiao));
+    assert(config[sizeof(config)-1]==0x5a);
+    assert(feishu_store_load_xiaozhi(small,sizeof(small))==ESP_ERR_INVALID_SIZE && !small[0]);
     feishu_cache_set_scope("cli_fresh","ou_self");
     feishu_outbox_t p,loaded;draft(&p);
     char first_uuid[41],retry_uuid[41];assert(feishu_outbox_uuid(&p,first_uuid));
@@ -88,6 +98,7 @@ int main(void)
         assert(feishu_cache_text_read_stream(loaded.body_name,loaded.object_id,false,0,out,sizeof(out),&n)==ESP_OK &&
             n==strlen(text) && !memcmp(out,text,n));
     }
+    assert(feishu_store_load_xiaozhi(config,sizeof(config))==ESP_OK && !strcmp(config,xiao));
     feishu_cache_unmount();assert(!lock_depth);
     puts("FlashDB app: fresh setup, no legacy import, shared configuration/cache, durable draft, uncertain send/retry UUID, IO reopen and cache pressure PASS");
     return 0;

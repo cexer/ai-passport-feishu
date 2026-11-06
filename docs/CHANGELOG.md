@@ -6,6 +6,38 @@
 
 ## Unreleased
 
+- Keep Add network and manual provisioning fixed below the Wi-Fi list with whitespace separation and default focus on Add. Add per-network Connect, Disconnect, Forget and Set password actions, explicit empty-list persistence, rollback using live credentials after a bad saved-password edit, and two-way double-click focus shortcuts alongside ordinary list/action boundary navigation. Include page-owned state in repaint detection so focus and editor changes render immediately.
+
+- Add network settings with up to ten remembered Wi-Fi profiles, nearby-network selection, a clear-text password keyboard and a phone provisioning entry. Device-side switching commits only after connection succeeds and attempts the previous network on failure. Use BOT wording throughout the account selection/authorization screens.
+
+- Fetch XiaoZhi pairing information on entry and renew missing/expired codes in the foreground, with one request at a time, a retry cooldown and cancellation on exit. Show a lazy, page-owned QR linking to the official console, and use distinct title/metadata colors in draft rows.
+
+- Use the same yellow outlined focus rows for account, image and draft actions. Move draft selection counts beside footer controls, keep pairing errors only in the red status line, remove duplicated headings, and add content spacing below the header while preserving message-list spacing.
+
+- Use one header/content/footer frame for setup and messenger pages, with battery status, separator rules and distinct blue/green setup QR codes. Add DOWN double-click to focus the composer and a XiaoZhi settings entry for bounded activation-code/status queries; unpaired voice attempts lead to pairing guidance without discarding existing drafts.
+
+- Simplify settings to compact text-only rows, separate footer actions with measured pixel gaps, and keep recording status and elapsed time on one line. Check the shared layout with simulator setup, messaging, recording, draft and error states; simulator examples do not replace device acceptance.
+
+- Use frame-scaled six-bit PCM for the transient XiaoZhi queue: save 5,688 bytes without shortening the 2.4-second backlog. Reject the smaller four-bit candidate after transcript regression; the final codec passes unchanged speech fixtures and native pressure/recovery checks.
+
+- Pause the optional cache worker while the microphone is prewarmed, and resume it on focus loss, failure or recording completion. Add opt-in read-only device MCP and bounded memory diagnostics; the ordinary messenger does not expose MCP tools.
+
+- Start recording with one composer confirmation and optionally prewarm the silent microphone on focus. Refresh the current conversation after successful sends; fit variable-height bubbles, redesign settings cards, soften text colors and use the same-size Medium font. Preserve matching APP/font rollback and existing bindings/drafts.
+
+- Compare all matching Wi-Fi APs by signal when no BSSID is pinned, instead of stopping at the first SSID match on a saved channel. Device tests found a stronger same-SSID AP without moving the device; XiaoZhi voice cases and the persistent review/send path then passed.
+
+- Erase each 16 KiB FlashDB sector's payload units before its header unit. A reset between physical 4 KiB erases now retains the GC recovery marker. Regression tests cut after every unit, reopen and verify retained data and subsequent writes.
+
+- Add an on-demand XiaoZhi ASR candidate using authenticated TLS WebSocket and 20 ms PCM frames with a bounded local IMA4 queue. Keep speech review and explicit Feishu send confirmation; discard downstream speech playback and reject entirely zero capture. Pause the optional local-cache worker during audio allocation and restore it after audio/network teardown. Retain the Feishu backend as an explicit build option. Native qualification is required before delivery.
+
+- Redesign the messenger and owned setup pages with a dark navy/teal palette and 70% backlight. Separate recognition text from status/actions, remove leading detail whitespace, use bounded 512-byte text windows, show six compact conversation rows and four message previews, and add a battery badge. Verify the 520 mAh fuel-gauge profile and update SOC without depending on an idle network queue.
+
+- Pin LVGL 9.5.0 and preserve the 24 KiB UI pool. Firmware verification now rejects an actual ELF whose static LVGL pool silently expands to 64 KiB during dependency resolution.
+
+- Overlap microphone settling with ASR connection preparation using the existing capture task; publish message lists before optional snapshot/read-state persistence, cancel obsolete message reads when switching conversations, warm cold snapshot chunk locators in a single bounded-table scan, and trace readiness latency. Retain the two-second microphone settling guard and the first retained frame before recording readiness.
+
+- Reclaim bounded batches of unreachable chunks and coalesce small cold-object evictions into one atomic catalog update. Preserve active readers and protected drafts; use transient allocation with a one-key fallback rather than a resident cache.
+
 - Reuse unpinned, unreferenced retired FlashDB catalog slots before reporting catalog exhaustion. Avoid whole-pool orphan scans for routine draft-state updates while retaining live/protected versions, active readers, atomic publication and non-repeating IDs.
 
 - Keep voice capture in the preparing state during a bounded two-second microphone pre-read; show recording only after the first retained frame. Reuse the existing PCM buffer, support cancellation during preparation, and keep the settling interval out of the recording duration. Physical confirmation of the reported missing prefix remains required.

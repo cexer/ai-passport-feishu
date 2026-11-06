@@ -448,3 +448,100 @@ Device open failures were SQLITE_IOERR_READ (extended 266), not evidence of miss
 The recovery read fresh device state immediately before writing, verified nine configuration keys with two CRC-valid mirrors each, and rebuilt the pool preserving all 18 non-database files byte-for-byte. Only objects.db and its journal were excluded; a complete encrypted original remains restorable. The rebuilt pool and identity window passed readback. The physical device retained binding: initial empty-slot scan including new DB creation was 659 ms, subsequent scan 0 ms with no unreadable slots. Chat requests succeeded. This recovers the current failure; prevention of repeated SPIFFS corruption and near-full performance remain unresolved.
 
 The current FlashDB raw-NOR host rerun passed full/eviction/reopen and 24 failed/partial-write recovery cases. That supports a backend candidate, not product migration, native timings, or physical power-cut safety. The next comparison must cover app object commits, required drafts, quotas, compression and fault recovery on the same device budget.
+
+## Interaction/font V19 and automatic acceptance (2026-11-06)
+
+The ordinary XiaoZhi variant is installed: APP **2,022,688 bytes**, SHA-256 `650dfc55133d25c28ddbd619b8fe1e8f980954781eb2bfe886186a161cd122aa`. Matching Medium font: **1,814,190 bytes**. Identity window, partition table, binding and the existing 1 MiB pool were preserved. The controller left the matching font untouched during V19 APP updates.
+
+| Evidence | Result | Boundary |
+| --- | --- | --- |
+| Build / Host tests | Full gate PASS; 24 KiB static LVGL pool verified | Extra geometry test passed after the gate: 256 height mixtures x 10 selected positions |
+| Simulator | Six screens rendered; no pure-white pixels | Synthetic UI only; no networking/microphone/battery claim |
+| Voice | Original nine cases plus warm-start/cancel/recovery PASS; warm first frame 34 ms | Known PCM inserted after real I2S reads; human voice remains unverified |
+| Send / current page | Durable ASR review exact, production send handler and fresh current-page readback PASS | POST 1,218 / 1,480 ms; not button-to-screen totals |
+| Focus + HTTPS | Three cycles of settled microphone + real message refresh + focus-loss release PASS | Heaps after cycles 85,444 / 85,232 / 81,216 B; this is not a long-term no-leak qualification |
+| Memory | Diagnostic low-water 17,576 B; no panic/watchdog | 20 KiB target remains open; long mixed workload and real power interruption unverified |
+| MCP | Configured service hello/initialize/initialized/tools-list PASS on host | Empty tools, zero audio/Feishu actions; no device MCP or simultaneous-TLS qualification |
+
+Local reproducible evidence: `build/device-checkpoint/experience-v19-xiao-native.json`, `build/experience-screenshots-v18/result.json`, `build/device-checkpoint/mcp-host-negotiation.json`. V19 contains lifecycle/queue coalescing refinements; its visual palette/layout matches the V18 fixture. No human participation requested while the user is unavailable.
+
+## Resource qualification V26 (2026-11-06)
+
+Ordinary XiaoZhi APP **2,022,064 B**, SHA-256 `dcc58162d19c58521aa939ac17654ec30545b23609473e7ac2a6a0b0e3ef74e4`, is installed with the unchanged matching 1,814,190-byte Medium font. Identity, partition table and binding checks passed; the existing pool/drafts were retained.
+
+| Check | Result | Scope |
+| --- | --- | --- |
+| Build / Host tests | Full gate PASS | PCM6 absolute-error/domain/bounds/40s reuse; prior protocol/layout/storage regressions |
+| Voice | Nine cases PASS; warm-start, warm-cancel and recovery PASS | Known PCM after real I2S reads; capture 16 kHz, network 8 kHz PCM |
+| Queue | Context 21,928 -> 16,240 B, saves 5,688 B | Same 120 x 20 ms = 2.4-second backlog; frame-scaled six-bit RAM packets |
+| Minimum heap | 22,372 B | Exceeds 20 KiB in this diagnostic load; not a universal floor |
+| Send | Exact durable ASR review, production send/current-page refresh PASS | POST 1,186 / 1,415 ms; three focus/refresh/release cycles PASS |
+| Separate memory diagnostics | Two independent 80/80 runs, stable audio tasks | Quiet TIME_WAIT 16 -> 0; 3,440 B recovered without reboot |
+| Separate MCP prototype | Device initialize/list, local status, one-message dual TLS and nonce PONG PASS | Minimum heap 37,644 B, smallest worker-stack margin 900 B; remote semantic calls=0 |
+
+V25's smaller 8 kHz/four-bit ADPCM candidate was rejected at 8/9: three host A/B trials each changed the fixture's brand name on the candidate while the previous codec matched. V26's six-bit candidate matched all three host trials before native qualification. Golden text was unchanged. V23's failed PONG assertion was corrected by explicitly propagating SDK control frames and testing partial/interleaved WS payloads.
+
+The first V26 launcher accidentally selected the old V25 controller; its pool-header preflight stopped before any APP write. The initial mismatching header bytes were not retained. A subsequent encrypted full-pool read-only backup found 64 valid headers, with no manual erase/repair. The corrected controller checks the target MAC and PCM6 artifact marker and captures any future bad sector encrypted before resetting. It then passed 64 headers and completed V26. Do not claim a confirmed cause for the initial mismatch.
+
+Evidence: `ram-v26-native.json`, corrected `ram-v26-native-console-corrected.txt`, `queue-compare-v25.json`, `queue-compare-v26.json`, `memory-v21-summary.json`, `mcp-v23-native.json`, `mcp-v24-native.json`, and encrypted `pool-preflight-20261106/` under local `build/device-checkpoint` (console in `build/`). The overwritten old V25 JSON is not its original acceptance record; its earlier 8/9/fallback console remains preserved.
+
+Unverified: natural human speech/screen/button experience, longer mixed workload and true power removal. Full assistant/UI control/query paging/reviewed sending are not implemented; ordinary ASR still advertises MCP disabled. The 900-byte prototype stack margin requires redesign before widening the tool path.
+
+The initial ordinary-boot serial window missed the binding log line. A separate continuous capture using the existing serial handle verified the same APP hash, `bound=1 wifi_setup=0 auth_request=0`, normal network entry and no faults; see `ram-v26-boot-confirm.json`. The initial false log-capture flag is retained in the final report.
+
+## Unified screens and account settings (2026-11-06)
+
+The ordinary XiaoZhi build is installed after the complete gate and silent native regression. APP 2,026,640 bytes, SHA-256 `4890374b747c501bc43a60b71312801512633b24186d02c35d40bbd7005cdbf6`; the mapped font remains 1,814,190 bytes. The existing binding, identity area, partition table and font were checked, and existing application data were preserved.
+
+| Evidence | Result | Boundary |
+| --- | --- | --- |
+| Build / Host tests | Complete repository gate PASS; composer shortcut and account/settings routing pass | Includes activation-code priority, bounds, malformed data and recovery |
+| Simulator | 33 states plus a double-click focus screenshot; 34 images and shared chrome/gap checks PASS | Synthetic data and invalid demo QR payloads; not device photographs |
+| Device voice | 9/9 plus warm-up/cancel recovery, 30 s, 1.5 s backlog and 5 s timeout recovery PASS | Real I2S reads with injected known PCM; human voice quality remains unverified |
+| Device account/query | XiaoZhi query cancellation then paired-state query PASS | Already paired device; first-time code entry/activation not physically exercised |
+| Device send/recovery | Durable ASR review, real send, newest message on current page and three focus/release cycles PASS | POST 1,476/1,992 ms in this workload; cold-load latency is not a guarantee |
+| Memory | Minimum free heap 20,776 bytes in this run; 2.4 s queue retained | This is only the observed workload, not a universal lower bound |
+| Unverified | Physical double-click feel, phone scanning of the new QR layout, first-time XiaoZhi pairing, long mixed load and real power loss | Existing device/account was not unpaired for this test |
+
+Settings now contain Network, Feishu account, Draft management, XiaoZhi settings and Return. Feishu account owns the existing login/application-selection/authorization flow; the client-session login experiment was cancelled by the user.
+
+Evidence: `build/device-checkpoint/ui-standard-native.json`, `build/ui-gallery-screenshots/result.json`, `build/feishu-ui-gallery-20261106.zip`. Ordinary firmware disables MCP and diagnostics.
+
+## Menu focus and status layout refinement (2026-11-06)
+
+Ordinary APP 2,026,288 bytes, SHA-256 `2ab38725e300620532e0fcd1b03fe7a311606b29da09d7d32b3757f962df6b05`, is installed. Build and the complete Host gate pass; 35 simulator frames pass footer-only red pairing-error, single menu-outline, draft-index, duplicate-heading and chrome/spacing checks. Native acceptance in this UI-only increment covers verified APP/font/table/identity, 64 pool headers, retained binding, normal boot and network connection without faults. It does not repeat the previous version's voice/send suite or establish physical display/button acceptance.
+
+Account, draft and image action pages reuse the settings row component and yellow focus outline. Pairing expiry/missing-code errors appear only in the footer. Draft selection counts share the footer control line. Default text/menu content starts at y=46 below the y=34 rule; message rows retain y=38. Six conversations still fit using 34 px rows/36 px stride. Duplicate image/confirmation titles are removed.
+
+Evidence: `build/device-checkpoint/ui-refined-native.json` and `build/ui-refined-gallery-screenshots/result.json`. The full 35-image package is `build/feishu-ui-refined-20261106.zip`; its QR/code data are synthetic. Existing bindings/data and mapped font are preserved.
+
+## XiaoZhi setup guidance and draft hierarchy (2026-11-06)
+
+Installed ordinary APP: 2,070,992 bytes; SHA-256 `db2eb8fb63b47be52d0c8e1d79d4c5184bcf8d55b0068f1d8b3271339537ab19`. Font: unchanged, 1,814,190 bytes. Settings order: Feishu account, XiaoZhi settings, Network, Draft management, Return.
+
+Missing/expired pairing UI starts one background query, with a 30-second retry cooldown and cancellation on exit. The public console QR is a 43,808-byte RGB565 Flash asset, avoiding a runtime full-image canvas. Draft titles and metadata use distinct text colors.
+
+Build/Host gate passed. Simulator passed 35 frames, six decoded console QR states, draft colors, settings order and the composer shortcut. Native tests passed cooldown, injected missing/expired UI states with real queries against the existing paired device, draft colors and QR cleanup. Ordinary firmware was restored with identity, partition, font, binding and application data preserved; no faults were recorded.
+
+This increment did not rerun voice or send suites. First-time unpaired activation, phone scanning, physical appearance and long-running fault tests remain unverified. `lv_free=3592` refers to the fixed 24 KiB LVGL pool, not total device heap. Evidence: `build/device-checkpoint/pairing-qr-native.json`, `build/pairing-qr-gallery-screenshots/result.json`; screenshot archive: `build/feishu-pairing-qr-20261106.zip`.
+
+## Network management and two-way focus switching (2026-11-06)
+
+Installed ordinary APP: 2,079,168 bytes; SHA-256 `655ba653303567c43ebf0f64514410ccb5faad1a94b997bea330025a16ed2a5c`. Font remains 1,814,190 bytes. Identity, partition layout, binding and application data were retained.
+
+| Layer | Verified result | Boundary |
+| --- | --- | --- |
+| Build / Host | Complete gate; ten-profile limit, edits preserving active selection, deletion/empty state, corruption rejection and re-add | Store contract runs against both file and actual FlashDB implementations; underlying failure/power-loss matrices remain covered |
+| Simulator | 50 frames; visible 64-character password, fixed actions, default Add focus, two-way double-click and ordinary boundary navigation, no extra rule | Synthetic data, not physical photos |
+| Device UI | Default Add, per-network actions/focus redraw, real scan after Add and transition to password page | Automated navigation; physical feel unverified |
+| Device network | Cancel, disconnect/reconnect, rollback after a wrong saved password, wrong candidate rollback, forget-last/re-add, scan and real Feishu conversation read | Silent; no message sends or voice suite rerun |
+| Installation | Ordinary firmware restored; identity/table/font checks pass, no faults, original data retained | Diagnostic disabled |
+| Unverified | Phone provisioning end to end, real power loss, prolonged mixed load and physical controls | Automatic speech playback is not integrated |
+
+Saved networks occupy the content list; Add and manual provisioning stay at the bottom with whitespace separation. Entry defaults to Add. A profile opens Connect, Disconnect, Forget and Set password. Editing saves without connecting or changing the active profile. Ordinary arrows cross the list/action boundary; double UP focuses content and double DOWN the composer/Add action. Page-owned editor state participates in repaint detection so cursor changes render immediately.
+
+A driver config measures 184 bytes: ten plus a 16-byte header require 1,856 logical bytes before redundant copies and KV overhead. The transient book buffer is capped at 2 KiB; list/editor state exists only while network settings is open.
+
+Separate silent probes of the existing XiaoZhi identity received no audio for two direct-TTS variants in six-second windows. The listen/detect route explicitly rejected long text as wake-word-only. The hello response advertised Opus/24 kHz. The current ASR integration therefore does not establish original-text playback support; a synthesis endpoint is needed before adding a working automatic-playback setting.
+
+Evidence: `build/device-checkpoint/network-focus-r2-native.json`, `build/network-focus-r2-gallery-screenshots/result.json`, `build/xiao-tts-interface-report.json`, `build/xiao-tts-alert-report.json`; archive: `build/feishu-network-ui-20261106.zip`. The earlier navigation-entry timeout rolled back automatically; `network-actions-r2-native.json` remains failed evidence. The installed version fixes entry-page ownership and repaint detection for page-owned state.

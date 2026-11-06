@@ -19,7 +19,7 @@ idf_component_register(
          "feishu_api.c"
          "feishu_voice.c"
          "feishu_auth_policy.c"
-         "feishu_asr.c" "feishu_asr_batch.c" "feishu_adpcm.c" "feishu_internal_asr_protocol.c"
+         "feishu_asr.c" "feishu_xiaozhi_protocol.c" "feishu_xiaozhi_audio.c" "feishu_asr_batch.c" "feishu_adpcm.c" "feishu_internal_asr_protocol.c"
          "feishu_http.c"
          "feishu_model.c" "feishu_page.c" "feishu_recovery.c"
          "feishu_network.c"
@@ -46,10 +46,27 @@ idf_component_register(
          ${feishu_storage_sources}
     INCLUDE_DIRS "."
     REQUIRES bsp esp_event esp_hw_support esp_http_client esp_http_server esp_netif esp_timer
-             esp_wifi json mbedtls nvs_flash spiffs ${feishu_storage_requires} heatshrink esp_partition jsonsl feishu_jpeg
+             esp_wifi tcp_transport json mbedtls nvs_flash spiffs ${feishu_storage_requires} heatshrink esp_partition jsonsl feishu_jpeg
 )
 
 target_compile_options(${COMPONENT_LIB} PRIVATE -Os)
+if("$ENV{FEISHU_NETWORK_UI_AUTOTEST}" STREQUAL "1")
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE FEISHU_NETWORK_UI_AUTOTEST=1)
+endif()
+if("$ENV{FEISHU_UI_AUTOTEST}" STREQUAL "1")
+    if(NOT FEISHU_ASR_BACKEND STREQUAL "xiaozhi")
+        message(FATAL_ERROR "UI pairing diagnostic requires the XiaoZhi backend")
+    endif()
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE FEISHU_UI_AUTOTEST=1)
+endif()
+if("$ENV{FEISHU_MEMORY_DIAGNOSTIC}" STREQUAL "1")
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE FEISHU_MEMORY_DIAGNOSTIC=1)
+endif()
+if("$ENV{FEISHU_NETWORK_DIAGNOSTIC}" STREQUAL "1")
+    target_sources(${COMPONENT_LIB} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../tools/network_probe/network_probe.c")
+    target_include_directories(${COMPONENT_LIB} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../build/network-probe")
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE FEISHU_NETWORK_DIAGNOSTIC=1)
+endif()
 if("$ENV{FEISHU_DRAFT_AUTOTEST}" STREQUAL "1")
     if(NOT "$ENV{FEISHU_VOICE_AUTOTEST}" STREQUAL "1" OR
        NOT "$ENV{FEISHU_VOICE_AUTOTEST_PROVISION}" STREQUAL "1")
@@ -99,4 +116,18 @@ if("$ENV{FEISHU_SEND_PERF_AUTOTEST}" STREQUAL "1")
         message(FATAL_ERROR "Send performance probe requires explicit business diagnostic")
     endif()
     target_compile_definitions(${COMPONENT_LIB} PRIVATE FEISHU_SEND_PERF_AUTOTEST=1)
+endif()
+
+set(FEISHU_ASR_BACKEND "feishu" CACHE STRING "Voice recognition backend: feishu (qualified baseline) or xiaozhi (experimental)")
+if(FEISHU_ASR_BACKEND STREQUAL "xiaozhi")
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE FEISHU_ASR_XIAOZHI=1)
+elseif(NOT FEISHU_ASR_BACKEND STREQUAL "feishu")
+    message(FATAL_ERROR "Unsupported FEISHU_ASR_BACKEND")
+endif()
+if("$ENV{FEISHU_MCP_DIAGNOSTIC}" STREQUAL "1")
+    if(NOT FEISHU_ASR_BACKEND STREQUAL "xiaozhi" OR "$ENV{FEISHU_MEMORY_DIAGNOSTIC}" STREQUAL "1")
+        message(FATAL_ERROR "MCP diagnostic requires XiaoZhi and ordinary heap configuration")
+    endif()
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE FEISHU_MCP_DIAGNOSTIC=1)
+    target_sources(${COMPONENT_LIB} PRIVATE "feishu_mcp.c" "feishu_mcp_wire.c")
 endif()

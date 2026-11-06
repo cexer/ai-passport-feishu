@@ -11,6 +11,9 @@
 #include "demo_radio.h"
 #include "setup_portal.h"
 #include "ui_pixel.h"
+#include "feishu_theme.h"
+#include "feishu_ui_chrome.h"
+#include "bsp_battery.h"
 
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -42,6 +45,7 @@ typedef struct {
     bool worker_finished;
     bool return_to_wifi;
     uint32_t revision;
+    int battery_percent;
 } onboarding_state_t;
 
 static onboarding_state_t s_state;
@@ -53,7 +57,9 @@ static lv_obj_t *s_title;
 static lv_obj_t *s_body;
 static lv_obj_t *s_qr;
 static lv_obj_t *s_step;
-static lv_obj_t *s_footer;
+static lv_obj_t *s_footer_actions[3];
+static lv_obj_t *s_notice;
+static lv_obj_t *s_battery;
 static lv_timer_t *s_timer;
 static product_onboarding_complete_cb_t s_complete;
 static bool s_completion_delivered;
@@ -100,7 +106,12 @@ static bool returning_to_wifi(void)
 }
 static bool auth_wait(unsigned milliseconds)
 {
+    static TickType_t sampled;
     for(unsigned elapsed=0;elapsed<milliseconds;elapsed+=100) {
+        if(xTaskGetTickCount()-sampled>=pdMS_TO_TICKS(15000)) {
+            int percent=bsp_battery_soc();sampled=xTaskGetTickCount();
+            xSemaphoreTake(s_lock,portMAX_DELAY);s_state.battery_percent=percent;xSemaphoreGive(s_lock);
+        }
         if(closing() || cancelled())return false;
         feishu_provision_commit_pending();
         vTaskDelay(pdMS_TO_TICKS(milliseconds-elapsed<100 ? milliseconds-elapsed:100));
@@ -117,16 +128,16 @@ static esp_err_t select_owner_app(feishu_credentials_t *credentials,const char *
     if(!request || !result)goto done;
     while(!closing() && !cancelled()) {
         if(usb_started && feishu_provision_credentials_received()) {err=ESP_OK;goto done;}
-        update_state(ONBOARD_AUTH_LOADING,"正在获取飞书应用入口...\n长按确定返回",NULL);
+        update_state(ONBOARD_AUTH_LOADING,"正在获取飞书BOT入口...\n长按确定返回",NULL);
         err=feishu_registration_begin_cancelable(request,preferred,auth_cancel,NULL);
         if(err!=ESP_OK) {
             if(cancelled() || closing())break;
-            update_state(ONBOARD_AUTH_LOADING,"应用入口暂时不可用，正在重试\n长按确定返回",NULL);
+            update_state(ONBOARD_AUTH_LOADING,"BOT入口暂时不可用，正在重试\n长按确定返回",NULL);
             if(!auth_wait(5000))break;
             if(usb_started && feishu_provision_credentials_received()) {err=ESP_OK;goto done;}
             continue;
         }
-        update_state(ONBOARD_APP_SETUP,"飞书扫码选择或新建应用\n长按确定取消",request->verification_url);
+        update_state(ONBOARD_APP_SETUP,"飞书扫码选择或新建BOT\n长按确定取消",request->verification_url);
         printf("FAP-SETUP/1 APP_AUTH %s\n",request->verification_url);
         int64_t deadline=esp_timer_get_time()+(int64_t)request->expires_in*1000000;
         unsigned interval=request->interval;
@@ -228,7 +239,7 @@ network_setup:
 configure_owner_app:
     err=feishu_store_load_app_credentials(credentials);
     if(err!=ESP_OK && err!=ESP_ERR_NVS_NOT_FOUND) {
-        update_state(ONBOARD_ERROR,"无法读取应用配置，未覆盖原数据",NULL);goto finished;
+        update_state(ONBOARD_ERROR,"无法读取BOT配置，未覆盖原数据",NULL);goto finished;
     }
     if(err==ESP_ERR_NVS_NOT_FOUND || auth_request==FEISHU_AUTH_CHANGE_APP || auth_request==FEISHU_AUTH_REPAIR_APP) {
         char preferred[FEISHU_APP_ID_MAX]={0};
@@ -236,7 +247,7 @@ configure_owner_app:
             memcpy(preferred,credentials->app_id,sizeof(preferred));
         err=select_owner_app(credentials,preferred);
         if(err==ESP_ERR_INVALID_STATE)goto cancelled;
-        if(err!=ESP_OK) {update_state(ONBOARD_ERROR,"无法完成应用选择，原配置保留",NULL);goto finished;}
+        if(err!=ESP_OK) {update_state(ONBOARD_ERROR,"无法完成BOT选择，原配置保留",NULL);goto finished;}
     }
     while(!closing() && !cancelled()) {
         feishu_binding_request_t request={0};
@@ -313,59 +324,43 @@ static void render(lv_timer_t *timer)
     memcpy(&snapshot, &s_state, sizeof(snapshot));
     xSemaphoreGive(s_lock);
 
+    feishu_ui_battery(s_battery,snapshot.battery_percent);
     if (snapshot.revision != s_rendered_revision) {
-        s_rendered_revision=snapshot.revision;
-        s_rendered_page = snapshot.page;
-        s_rendered_qr[0] = '\0';
-        feishu_qr_retry_reset(&s_qr_retry);
-        lv_obj_add_flag(s_qr, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_style_text_color(s_body,lv_color_hex(UI_INK),0);
+        s_rendered_revision=snapshot.revision;s_rendered_page=snapshot.page;
+        s_rendered_qr[0]='\0';feishu_qr_retry_reset(&s_qr_retry);
+        lv_obj_add_flag(s_qr,LV_OBJ_FLAG_HIDDEN);
         bool app=snapshot.page==ONBOARD_APP_SETUP;
         bool auth=snapshot.page==ONBOARD_BINDING;
         bool qr=app || auth;
-        uint32_t accent=auth ? 0x174B37:0x133B6D;
-        lv_obj_set_style_bg_color(s_screen,lv_color_hex(auth ? 0xEDF8F1:app ? 0xECF3FF:UI_PAPER),0);
-        lv_obj_set_style_text_color(s_title,lv_color_hex(qr ? accent:UI_INK),0);
-        lv_obj_align(s_title,LV_ALIGN_TOP_MID,0,qr ? 34:16);
+        lv_obj_set_style_text_color(s_body,lv_color_hex(FEISHU_TEXT),0);
+        lv_obj_set_style_text_color(s_notice,lv_color_hex(snapshot.page==ONBOARD_ERROR ? FEISHU_ERROR:FEISHU_MUTED),0);
+        lv_label_set_text(s_notice,qr ? snapshot.status:snapshot.page==ONBOARD_ERROR ? "操作未完成":"");
+        feishu_ui_actions(s_footer_actions,snapshot.page==ONBOARD_ERROR ? "确定重试  长按返回":"长按确定返回");
+        lv_obj_set_pos(s_body,12,qr ? 230:46);
         if(qr) {
-            lv_label_set_text(s_step,app ? "第 2 / 3 步 · 应用":"第 3 / 3 步 · 账号");
-            lv_obj_set_style_text_color(s_step,lv_color_hex(accent),0);
             lv_obj_remove_flag(s_step,LV_OBJ_FLAG_HIDDEN);
-            lv_obj_remove_flag(s_footer,LV_OBJ_FLAG_HIDDEN);
-            lv_qrcode_set_dark_color(s_qr,lv_color_hex(accent));
+            lv_label_set_text(s_step,app ? "第2/3步 | 选择BOT":"第3/3步 | BOT授权");
+            lv_obj_set_style_text_color(s_step,lv_color_hex(app ? 0x91B4DF:FEISHU_ACCENT),0);
+            lv_qrcode_set_dark_color(s_qr,lv_color_hex(app ? 0x245C96:0x146341));
+        } else lv_obj_add_flag(s_step,LV_OBJ_FLAG_HIDDEN);
+        if(snapshot.page==ONBOARD_CONNECTING) {
+            lv_label_set_text(s_title,"连接 Wi-Fi");lv_label_set_text(s_body,snapshot.status);
+        } else if(snapshot.page==ONBOARD_AUTH_LOADING) {
+            lv_label_set_text(s_title,"连接飞书服务");lv_label_set_text(s_body,snapshot.status);
+        } else if(snapshot.page==ONBOARD_WIFI_SETUP) {
+            lv_label_set_text(s_title,"连接设备热点");
+            lv_label_set_text_fmt(s_body,"手机打开 Wi-Fi 设置\n\n%s\n无需密码，直接连接\n\n连接后打开配网页\nhttp://%s\n\n提示无互联网时请保持连接",snapshot.portal.ssid,snapshot.portal.address);
+            lv_label_set_text(s_notice,snapshot.status);
+        } else if(app) {
+            lv_label_set_text(s_title,"选择飞书BOT");
+            lv_label_set_text(s_body,"飞书扫一扫，选择或新建BOT\n完成后进入BOT授权");
+        } else if(auth) {
+            lv_label_set_text(s_title,"BOT授权");
+            lv_label_set_text(s_body,"飞书扫一扫，授权BOT\n完成后以你的身份收发消息");
+        } else if(snapshot.page==ONBOARD_SUCCESS) {
+            lv_label_set_text(s_title,"设置完成");lv_label_set_text(s_body,"飞书绑定成功\n\n正在打开会话…");
         } else {
-            lv_obj_add_flag(s_step,LV_OBJ_FLAG_HIDDEN);
-            lv_obj_add_flag(s_footer,LV_OBJ_FLAG_HIDDEN);
-        }
-        lv_obj_align(s_body, snapshot.page == ONBOARD_WIFI_SETUP ?
-                     LV_ALIGN_TOP_MID : LV_ALIGN_BOTTOM_MID, 0,
-                     snapshot.page == ONBOARD_WIFI_SETUP ? 60 : qr ? -42 : -12);
-        if (snapshot.page == ONBOARD_CONNECTING) {
-            lv_label_set_text(s_title, "连接 Wi-Fi");
-            lv_label_set_text_fmt(s_body,"\n%s",snapshot.status);
-        } else if(snapshot.page == ONBOARD_AUTH_LOADING) {
-            lv_label_set_text(s_title,"连接飞书服务");
-            lv_label_set_text_fmt(s_body,"\n%s",snapshot.status);
-        } else if (snapshot.page == ONBOARD_WIFI_SETUP) {
-            lv_label_set_text(s_title, "手机连接设备热点");
-            lv_label_set_text_fmt(s_body,
-                "%s%s打开手机设置中的 Wi-Fi\n\n%s\n无需密码，点击连接\n\n连接后打开配网页\n未弹出请用浏览器访问\nhttp://%s\n\n无互联网提示请保持连接",
-                snapshot.status,snapshot.status[0] ? "\n\n":"",snapshot.portal.ssid,
-                snapshot.portal.address);
-        } else if (snapshot.page == ONBOARD_APP_SETUP) {
-            lv_label_set_text(s_title, "选择飞书应用");
-            lv_label_set_text(s_body,
-                "用飞书扫一扫此二维码\n选择已有应用，或新建");
-        } else if (snapshot.page == ONBOARD_BINDING) {
-            lv_label_set_text(s_title, "授权个人账号");
-            lv_label_set_text(s_body,
-                "应用已选好，请再次扫码\n授权后以你的身份收发");
-        } else if (snapshot.page == ONBOARD_SUCCESS) {
-            lv_label_set_text(s_title, "设置完成");
-            lv_label_set_text(s_body, "\nOK 飞书绑定成功\n\n正在打开消息...");
-        } else {
-            lv_label_set_text(s_title, "暂时无法继续");
-            lv_label_set_text_fmt(s_body, "\n%s\n\n按 OK 重启重试", snapshot.status);
+            lv_label_set_text(s_title,"连接暂不可用");lv_label_set_text(s_body,snapshot.status);
         }
     }
     if ((snapshot.page == ONBOARD_APP_SETUP ||
@@ -373,21 +368,21 @@ static void render(lv_timer_t *timer)
         strcmp(snapshot.qr_data, s_rendered_qr) != 0 &&
         feishu_qr_retry_due(&s_qr_retry,lv_tick_get())) {
         bool recovering=s_qr_retry.failed;
-        if(!lv_canvas_get_draw_buf(s_qr))lv_qrcode_set_size(s_qr,164);
+        if(!lv_canvas_get_draw_buf(s_qr))lv_qrcode_set_size(s_qr,156);
         bool okay=lv_qrcode_update(s_qr,snapshot.qr_data,strlen(snapshot.qr_data))==LV_RESULT_OK;
         feishu_qr_retry_result(&s_qr_retry,lv_tick_get(),okay);
         if(okay) {
             feishu_utf8_copy(s_rendered_qr,sizeof(s_rendered_qr),snapshot.qr_data);
             lv_obj_remove_flag(s_qr,LV_OBJ_FLAG_HIDDEN);
             if(recovering) {
-                lv_obj_set_style_text_color(s_body,lv_color_hex(UI_INK),0);
+                lv_obj_set_style_text_color(s_body,lv_color_hex(FEISHU_TEXT),0);
                 lv_label_set_text(s_body,snapshot.page==ONBOARD_APP_SETUP ?
-                    "用飞书扫一扫此二维码\n选择已有应用，或新建":
-                    "应用已选好，请再次扫码\n授权后以你的身份收发");
+                    "飞书扫一扫，选择或新建BOT\n完成后进入BOT授权":
+                    "飞书扫一扫，授权BOT\n完成后以你的身份收发消息");
             }
         } else {
             lv_obj_add_flag(s_qr,LV_OBJ_FLAG_HIDDEN);
-            lv_obj_set_style_text_color(s_body,lv_color_hex(0xB42318),0);
+            lv_obj_set_style_text_color(s_body,lv_color_hex(FEISHU_ERROR),0);
             lv_label_set_text(s_body,"二维码绘制失败，正在重试\n长按确定可返回");
             ESP_LOGW(TAG,"QR draw failed: phase=%u bytes=%u",(unsigned)snapshot.page,(unsigned)strlen(snapshot.qr_data));
         }
@@ -399,10 +394,11 @@ static void render(lv_timer_t *timer)
     }
 }
 
-void product_onboarding_enter(product_onboarding_complete_cb_t callback)
+void product_onboarding_enter(product_onboarding_complete_cb_t callback,int battery_percent)
 {
     memset(&s_state, 0, sizeof(s_state));
     s_state.page = ONBOARD_CONNECTING;
+    s_state.battery_percent=battery_percent;
     s_complete = callback;
     s_completion_delivered = false;
     s_rendered_page = (onboarding_page_t)-1;
@@ -414,35 +410,28 @@ void product_onboarding_enter(product_onboarding_complete_cb_t callback)
 
     s_screen = lv_obj_create(NULL);
     lv_obj_remove_flag(s_screen, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(s_screen, lv_color_hex(UI_PAPER), 0);
+    lv_obj_set_style_bg_color(s_screen, lv_color_hex(FEISHU_BG), 0);
+    lv_obj_set_style_bg_opa(s_screen,LV_OPA_COVER,0);
     lv_obj_set_style_border_width(s_screen, 0, 0);
     lv_obj_set_style_pad_all(s_screen, 0, 0);
-    s_title = lv_label_create(s_screen);
-    lv_obj_set_width(s_title, 220);
-    lv_obj_align(s_title, LV_ALIGN_TOP_MID, 0, 16);
-    lv_obj_set_style_text_font(s_title, &lv_font_ai_passport_14, 0);
-    lv_obj_set_style_text_align(s_title, LV_TEXT_ALIGN_CENTER, 0);
+    feishu_ui_header(s_screen,&s_title,&s_battery);
     s_qr = lv_qrcode_create(s_screen);
-    lv_qrcode_set_size(s_qr, 164);
-    lv_qrcode_set_dark_color(s_qr, lv_color_hex(UI_INK));
-    lv_qrcode_set_light_color(s_qr, lv_color_hex(0xFFFFFF));
+    lv_qrcode_set_size(s_qr, 156);
+    lv_qrcode_set_dark_color(s_qr, lv_color_hex(FEISHU_BG));
+    lv_qrcode_set_light_color(s_qr, lv_color_hex(FEISHU_QR_LIGHT));
     lv_qrcode_set_quiet_zone(s_qr, true);
-    lv_obj_align(s_qr, LV_ALIGN_CENTER, 0, -16);
+    lv_obj_set_pos(s_qr,42,68);
     lv_obj_add_flag(s_qr, LV_OBJ_FLAG_HIDDEN);
     lv_obj_set_style_border_width(s_qr,0,0);
-    lv_obj_set_style_border_color(s_qr,lv_color_hex(0xFFFFFF),0);
+    lv_obj_set_style_border_color(s_qr,lv_color_hex(FEISHU_QR_LIGHT),0);
     lv_obj_set_style_radius(s_qr,8,0);
     s_step=lv_label_create(s_screen);
     lv_obj_set_style_text_font(s_step,&lv_font_ai_passport_14,0);
-    lv_obj_align(s_step,LV_ALIGN_TOP_MID,0,10);
-    s_footer=lv_label_create(s_screen);
-    lv_obj_set_style_text_font(s_footer,&lv_font_ai_passport_14,0);
-    lv_obj_set_style_text_color(s_footer,lv_color_hex(0x516371),0);
-    lv_label_set_text(s_footer,"长按确定返回");
-    lv_obj_align(s_footer,LV_ALIGN_BOTTOM_MID,0,-12);
+    lv_obj_align(s_step,LV_ALIGN_TOP_MID,0,46);
+    feishu_ui_footer(s_screen,&s_notice,s_footer_actions);
     s_body = lv_label_create(s_screen);
-    lv_obj_set_width(s_body, 224);
-    lv_obj_align(s_body, LV_ALIGN_BOTTOM_MID, 0, -12);
+    lv_obj_set_width(s_body, 216);
+    lv_obj_set_pos(s_body,12,46);
     lv_obj_set_style_text_font(s_body, &lv_font_ai_passport_14, 0);
     lv_obj_set_style_text_align(s_body, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(s_body, LV_LABEL_LONG_WRAP);

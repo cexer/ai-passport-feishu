@@ -38,3 +38,14 @@ bool feishu_fdb_room(size_t margin);
 /* Changes on every raw mutation attempt and open/close. RAM proofs must not
  * survive this epoch; every requested chunk still receives its own CRC check. */
 uint64_t feishu_fdb_revision(void);
+
+/* Match unreachable records under the serialized pool lock. The matcher may
+ * read but must not mutate the engine. Select at most 32, end iteration,
+ * prime revalidated locators, then delete. Failure stops further mutations. */
+int feishu_fdb_collect_if(feishu_fdb_visit_t match,void *ctx,size_t *bytes);
+uint64_t feishu_fdb_root_revision(void);
+
+/* Warm existing bounded KV locator hints in one read-only prefix iteration.
+ * A cached endpoint pair skips the scan. Every get still revalidates its key,
+ * record status and CRC. Call only under the serialized engine owner lock. */
+int feishu_fdb_prefetch(const char *prefix,const char *first,const char *last,unsigned count);

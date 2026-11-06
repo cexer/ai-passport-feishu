@@ -2,12 +2,13 @@
 #include "feishu_store_legacy.h"
 #include "feishu_root.h"
 #include "feishu_cache.h"
+#include "feishu_wifi_book.h"
 #include "esp_random.h"
 #include "nvs.h"
 #include <stdlib.h>
 #include <string.h>
 
-enum { ROOT_MIGRATION,ROOT_CREDENTIALS,ROOT_ACCESS,ROOT_OWNER,ROOT_SEEN,ROOT_WIFI_SETUP,ROOT_WIFI,ROOT_AUTH_REQUEST,ROOT_VOICE };
+enum { ROOT_MIGRATION,ROOT_CREDENTIALS,ROOT_ACCESS,ROOT_OWNER,ROOT_SEEN,ROOT_WIFI_SETUP,ROOT_WIFI,ROOT_AUTH_REQUEST,ROOT_VOICE,ROOT_XIAOZHI,ROOT_WIFI_BOOK };
 typedef struct {
     uint32_t version,reserved;
     uint64_t epoch;
@@ -284,19 +285,84 @@ esp_err_t feishu_store_mark_seen(const char *chat_id,uint64_t time_ms)
 }
 esp_err_t feishu_store_load_wifi(void *config,size_t size)
 {
-    if(!config || !size || size>2048)return ESP_ERR_INVALID_ARG;
-    memset(config,0,size);esp_err_t err=begin();if(err!=ESP_OK)return err;
-    size_t total;err=read_part(ROOT_WIFI,0,config,size,&total);
-    if(err==ESP_OK && total!=size)err=ESP_ERR_INVALID_VERSION;
-    if(err!=ESP_OK)memset(config,0,size);
-    return end(err);
+    return feishu_store_get_wifi(SIZE_MAX,config,size);
+}
+/* Keep the previous single-network recovery record untouched for firmware
+ * rollback. A missing book imports it in RAM; corrupt books are never hidden
+ * by silently selecting an older network. */
+static esp_err_t wifi_read_book(void *book,size_t *total)
+{
+    unsigned key=ROOT_WIFI_BOOK;esp_err_t err=read_part(key,0,NULL,0,total);
+    if(err==ESP_ERR_NVS_NOT_FOUND){key=ROOT_WIFI;err=read_part(key,0,NULL,0,total);}
+    if(err==ESP_OK && *total>FEISHU_WIFI_BOOK_MAX)return FEISHU_STORE_ERR_CORRUPT;
+    if(err==ESP_OK)err=read_part(key,0,book,*total,total);
+    return err;
 }
 esp_err_t feishu_store_save_wifi(const void *config,size_t size)
 {
-    if(!config || !size || size>2048)return ESP_ERR_INVALID_ARG;
+    if(!config || size<32 || size>(FEISHU_WIFI_BOOK_MAX-sizeof(feishu_wifi_book_header_t))/FEISHU_WIFI_SLOTS)return ESP_ERR_INVALID_ARG;
     esp_err_t err=begin();if(err!=ESP_OK)return err;
-    return end(save_value(ROOT_WIFI,config,size));
+    void *book=calloc(1,FEISHU_WIFI_BOOK_MAX);if(!book)return end(ESP_ERR_NO_MEM);
+    size_t total=0;err=wifi_read_book(book,&total);
+    if(err==ESP_ERR_NVS_NOT_FOUND){err=ESP_OK;total=0;}
+    if(err==ESP_OK && total && !feishu_wifi_book_import(book,&total,size))err=FEISHU_STORE_ERR_CORRUPT;
+    if(err==ESP_OK && !feishu_wifi_book_upsert(book,&total,config,size))err=FEISHU_STORE_ERR_FULL;
+    if(err==ESP_OK)err=save_value(ROOT_WIFI_BOOK,book,total);
+    memset(book,0,FEISHU_WIFI_BOOK_MAX);free(book);return end(err);
 }
+esp_err_t feishu_store_get_wifi(size_t index,void *config,size_t size)
+{
+    if(!config || size<32 || size>FEISHU_WIFI_BOOK_MAX)return ESP_ERR_INVALID_ARG;
+    memset(config,0,size);esp_err_t err=begin();if(err!=ESP_OK)return err;
+    void *book=calloc(1,FEISHU_WIFI_BOOK_MAX);if(!book)return end(ESP_ERR_NO_MEM);
+    size_t total=0;err=wifi_read_book(book,&total);
+    if(err==ESP_OK && !feishu_wifi_book_import(book,&total,size))err=FEISHU_STORE_ERR_CORRUPT;
+    if(err==ESP_OK) {
+        feishu_wifi_book_header_t *h=book;bool current=index==SIZE_MAX;if(current)index=h->active;
+        if(!h->count && current)err=FEISHU_STORE_ERR_WIFI_EMPTY;
+        else if(index>=h->count)err=ESP_ERR_INVALID_ARG;
+        else memcpy(config,feishu_wifi_book_entry(book,index),size);
+    }
+    memset(book,0,FEISHU_WIFI_BOOK_MAX);free(book);return end(err);
+}
+esp_err_t feishu_store_list_wifi(char names[FEISHU_WIFI_SAVED_MAX][33],size_t *count,size_t *active,size_t size)
+{
+    if(!names || !count || !active)return ESP_ERR_INVALID_ARG;
+    *count=0;*active=0;memset(names,0,FEISHU_WIFI_SAVED_MAX*33);
+    esp_err_t err=begin();if(err!=ESP_OK)return err;
+    void *book=calloc(1,FEISHU_WIFI_BOOK_MAX);if(!book)return end(ESP_ERR_NO_MEM);
+    size_t total=0;err=wifi_read_book(book,&total);
+    if(err==ESP_OK && !feishu_wifi_book_import(book,&total,size))err=FEISHU_STORE_ERR_CORRUPT;
+    if(err==ESP_OK) {
+        feishu_wifi_book_header_t *h=book;*count=h->count;*active=h->active;
+        for(size_t i=0;i<h->count;++i)memcpy(names[i],feishu_wifi_book_entry(book,i),32);
+    }
+    memset(book,0,FEISHU_WIFI_BOOK_MAX);free(book);
+    return end(err==ESP_ERR_NVS_NOT_FOUND ? ESP_OK:err);
+}
+static esp_err_t wifi_change(size_t index,const void *config,size_t size)
+{
+    if(size<32 || size>(FEISHU_WIFI_BOOK_MAX-sizeof(feishu_wifi_book_header_t))/FEISHU_WIFI_SLOTS)return ESP_ERR_INVALID_ARG;
+    esp_err_t err=begin();if(err!=ESP_OK)return err;
+    void *book=calloc(1,FEISHU_WIFI_BOOK_MAX);if(!book)return end(ESP_ERR_NO_MEM);
+    size_t total=0;err=wifi_read_book(book,&total);
+    if(err==ESP_OK && !feishu_wifi_book_import(book,&total,size))err=FEISHU_STORE_ERR_CORRUPT;
+    if(err==ESP_OK) {
+        feishu_wifi_book_header_t *h=book;
+        if(index>=h->count)err=ESP_ERR_INVALID_ARG;
+        else if(config) {
+            void *entry=feishu_wifi_book_entry(book,index);
+            if(strncmp(entry,config,32))err=ESP_ERR_INVALID_ARG;
+            else memcpy(entry,config,size);
+        } else if(!feishu_wifi_book_remove(book,&total,index,size))err=FEISHU_STORE_ERR_CORRUPT;
+    }
+    if(err==ESP_OK)err=save_value(ROOT_WIFI_BOOK,book,total);
+    memset(book,0,FEISHU_WIFI_BOOK_MAX);free(book);return end(err);
+}
+esp_err_t feishu_store_update_wifi(size_t index,const void *config,size_t size)
+{if(!config)return ESP_ERR_INVALID_ARG;return wifi_change(index,config,size);}
+esp_err_t feishu_store_remove_wifi(size_t index,size_t size)
+{return wifi_change(index,NULL,size);}
 esp_err_t feishu_store_get_auth_request(unsigned *request)
 {
     if(!request)return ESP_ERR_INVALID_ARG;
@@ -314,3 +380,22 @@ esp_err_t feishu_store_request_auth(unsigned request)
     uint8_t value=(uint8_t)request;return end(save_value(ROOT_AUTH_REQUEST,&value,1));
 }
 
+
+esp_err_t feishu_store_load_xiaozhi(char *json,size_t capacity)
+{
+    if(!json || !capacity)return ESP_ERR_INVALID_ARG;
+    json[0]=0;esp_err_t err=begin();if(err!=ESP_OK)return err;
+    size_t total=0;err=read_part(ROOT_XIAOZHI,0,NULL,0,&total);
+    if(err==ESP_OK && (!total || total>capacity))err=ESP_ERR_INVALID_SIZE;
+    /* Root reads are exact slices, not fread-style up-to-capacity reads. */
+    if(err==ESP_OK)err=read_part(ROOT_XIAOZHI,0,json,total,&total);
+    if(err==ESP_OK && (json[total-1] || strlen(json)!=total-1))err=FEISHU_STORE_ERR_CORRUPT;
+    if(err!=ESP_OK)json[0]=0;
+    return end(err);
+}
+esp_err_t feishu_store_save_xiaozhi(const char *json)
+{
+    if(!json || !*json || strlen(json)>=FEISHU_XIAOZHI_CONFIG_MAX)return ESP_ERR_INVALID_ARG;
+    esp_err_t err=begin();if(err!=ESP_OK)return err;
+    return end(save_value(ROOT_XIAOZHI,json,strlen(json)+1));
+}

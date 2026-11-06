@@ -2,6 +2,7 @@
 // button/LVGL task; the physical OK key is the final send confirmation.
 #include "demo.h"
 #include "bsp_battery.h"
+#include "bsp_display.h"
 #include "feishu_api.h"
 #include "feishu_asr.h"
 #include "feishu_network.h"
@@ -11,6 +12,10 @@
 #include "feishu_image_fs.h"
 #include "feishu_http.h"
 #include "ui_pixel.h"
+#include "feishu_theme.h"
+#include "feishu_ui_chrome.h"
+#include "feishu_pairing_policy.h"
+#include "feishu_xiao_console_qr.h"
 
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -45,6 +50,9 @@ static bool s_voice_ui_probe;
 static volatile bool s_voice_force_offline;
 #endif
 static void handle_navigation(feishu_nav_event_t event);
+static esp_err_t reserve_audio_resources(void);
+static void release_audio_resources(void);
+static bool s_focus_audio_reserved;
 
 typedef enum {
     WORK_INIT = 0,
@@ -63,11 +71,23 @@ typedef enum {
     WORK_DISCARD_DRAFT,
     WORK_LOAD_IMAGE,
     WORK_FETCH_IMAGE,
+    WORK_AUDIO_FOCUS,
     WORK_RECORD,
     WORK_SEND,
     WORK_RESET_WIFI,
     WORK_UNBIND,
     WORK_REAUTHORIZE,
+    WORK_CHECK_XIAOZHI,
+    WORK_NETWORK_LIST,
+    WORK_NETWORK_SCAN,
+    WORK_NETWORK_CONNECT,
+    WORK_NETWORK_DISCONNECT,
+    WORK_NETWORK_REMOVE,
+    WORK_NETWORK_EDIT,
+    WORK_NETWORK_PASSWORD_SAVE,
+#ifdef FEISHU_NETWORK_UI_AUTOTEST
+    WORK_NETWORK_AUTOTEST,
+#endif
     WORK_EXIT,
 } work_command_t;
 static void enqueue(work_command_t command);
@@ -121,6 +141,12 @@ typedef struct {
     volatile bool stop_recording;
     volatile unsigned elapsed_ms;
     int battery_percent;
+    feishu_asr_pairing_t pairing;
+    volatile bool cancel_pairing;
+    bool pairing_busy,pairing_auto_blocked;
+    uint32_t pairing_retry_at;
+    feishu_page_t pairing_return_page;
+    uint32_t pairing_request;
 } feishu_ui_state_t;
 
 static lv_obj_t *s_scr;
@@ -130,11 +156,14 @@ static lv_obj_t *s_page_info;
 static lv_obj_t *s_content;
 static lv_obj_t *s_viewport;
 static lv_obj_t *s_image;
+static lv_obj_t *s_pair_qr;
+static lv_obj_t *s_pair_caption;
 static lv_obj_t *s_hint;
+static lv_obj_t *s_hint_groups[2];
 static lv_obj_t *s_notice;
-static lv_obj_t *s_header_rule;
-#define FEISHU_VISIBLE_ROWS 4
-#define FEISHU_CONTENT_HEIGHT 226
+#define FEISHU_VISIBLE_ROWS FEISHU_CHAT_ROWS
+#define FEISHU_CONTENT_TOP 46
+#define FEISHU_CONTENT_HEIGHT 218
 static lv_obj_t *s_rows[FEISHU_VISIBLE_ROWS];
 static lv_obj_t *s_row_avatar[FEISHU_VISIBLE_ROWS];
 static lv_obj_t *s_row_avatar_text[FEISHU_VISIBLE_ROWS];
@@ -142,6 +171,9 @@ static lv_obj_t *s_row_text[FEISHU_VISIBLE_ROWS];
 static lv_obj_t *s_row_subtext[FEISHU_VISIBLE_ROWS];
 static lv_obj_t *s_row_mark[FEISHU_VISIBLE_ROWS];
 static lv_timer_t *s_timer;
+#ifdef FEISHU_UI_AUTOTEST
+static lv_timer_t *s_ui_smoke_timer;
+#endif
 static QueueHandle_t s_work_queue;
 static SemaphoreHandle_t s_state_lock;
 static SemaphoreHandle_t s_worker_done;
@@ -156,6 +188,7 @@ static char s_cache_owner[FEISHU_CHAT_ID_MAX];
 static int64_t s_chat_pin, s_message_pin,s_text_pin;
 static int64_t s_image_pin;
 static atomic_bool s_authenticated;
+static atomic_bool s_audio_focus_queued;
 static unsigned s_displayed_image_version;
 
 /* The timer also runs while a scanline image is visible. Re-setting unchanged
@@ -173,7 +206,46 @@ static bool online(void) {
     return atomic_load(&s_authenticated) && feishu_network_connected();
 }
 
-#define FEISHU_MESSAGE_ROWS 3
+/* Only the business worker starts/joins audio. UI cancellation is atomic. */
+static void sync_audio_focus(void)
+{
+    xSemaphoreTake(s_state_lock,portMAX_DELAY);
+    bool recording=s_state.nav.page==FEISHU_PAGE_RECORDING || s_state.nav.page==FEISHU_PAGE_TRANSCRIBING;
+    bool wanted=s_state.ready && !s_state.closing && !s_state.loading &&
+        s_state.nav.page==FEISHU_PAGE_MESSAGES && s_state.nav.composer_selected && online();
+    xSemaphoreGive(s_state_lock);
+    if(recording)return;
+    if(!wanted)feishu_asr_prepare_cancel();
+    if(atomic_exchange(&s_audio_focus_queued,true))return;
+    work_command_t command=WORK_AUDIO_FOCUS;
+    if(!s_work_queue || xQueueSend(s_work_queue,&command,0)!=pdTRUE)
+        atomic_store(&s_audio_focus_queued,false); /* optional, never block input */
+}
+
+static void apply_audio_focus(void)
+{
+    xSemaphoreTake(s_state_lock,portMAX_DELAY);
+    bool recording=s_state.nav.page==FEISHU_PAGE_RECORDING || s_state.nav.page==FEISHU_PAGE_TRANSCRIBING;
+    bool wanted=s_state.ready && !s_state.closing && !s_state.loading &&
+        s_state.nav.page==FEISHU_PAGE_MESSAGES && s_state.nav.composer_selected && online();
+    xSemaphoreGive(s_state_lock);
+    if(recording)return;
+    if(wanted) {
+        if(!s_focus_audio_reserved) {
+            if(reserve_audio_resources()!=ESP_OK)return;
+            s_focus_audio_reserved=true;
+        }
+        if(feishu_asr_prepare(true)!=ESP_OK) {
+            (void)feishu_asr_prepare(false);
+            release_audio_resources();
+        }
+    } else {
+        (void)feishu_asr_prepare(false);
+        if(s_focus_audio_reserved)release_audio_resources();
+    }
+}
+
+#define FEISHU_MESSAGE_ROWS 5
 #define FEISHU_REFRESH_BATCH 1
 
 static void make_reply_uuid(char output[41])
@@ -213,6 +285,7 @@ static uint64_t seen_time(const feishu_seen_t *seen, size_t count,
 
 static esp_err_t load_messages_for_chat(size_t chat_index, bool mark_seen,bool prefer_cache)
 {
+    TickType_t load_started=xTaskGetTickCount();
     message_page_frame_t *frame=calloc(1,sizeof(*frame));
     feishu_message_t *messages=frame ? frame->messages:NULL;
     char chat_id[FEISHU_CHAT_ID_MAX];
@@ -265,7 +338,8 @@ static esp_err_t load_messages_for_chat(size_t chat_index, bool mark_seen,bool p
     bool saved=false;
     if(err==ESP_OK && !cached) {
         count=frame->page.count;feishu_utf8_copy(frame->chat,sizeof(frame->chat),chat_id);
-        saved=feishu_cache_write_if_scope(scope,page_key,frame,sizeof(*frame),1)==ESP_OK;framed=saved;
+        /* Publish the received page to the UI before cache/seen writes. */
+        framed=true;
     }
     if(cached) ESP_LOGI(TAG,"cache hit: message snapshot");
     if (err != ESP_OK) {
@@ -282,6 +356,8 @@ static esp_err_t load_messages_for_chat(size_t chat_index, bool mark_seen,bool p
     memcpy(s_state.messages, messages, sizeof(s_state.messages));
     feishu_utf8_copy(s_state.loaded_chat,sizeof(s_state.loaded_chat),chat_id);
     s_state.nav.message_count = count;
+    s_state.loading=false;
+    s_state.status[0]=0;
     if(!ram_hit) {
         s_state.message_page_key[0]=0;s_state.message_page_number=0;s_state.message_page_more=false;
         if(framed) {
@@ -307,9 +383,17 @@ static esp_err_t load_messages_for_chat(size_t chat_index, bool mark_seen,bool p
     if (mark_seen) s_state.chats[chat_index].unread_count = 0;
     }
     xSemaphoreGive(s_state_lock);
-    if (applied && mark_seen && latest > 0) feishu_store_mark_seen(chat_id, latest);
+    if(applied)sync_audio_focus();
+    ESP_LOGI(TAG,"MESSAGE_READY cache=%u ram=%u applied=%u rows=%u ms=%u",
+        (unsigned)cached,(unsigned)ram_hit,(unsigned)applied,(unsigned)count,
+        (unsigned)((xTaskGetTickCount()-load_started)*portTICK_PERIOD_MS));
     if(!cached) {
-        if(applied && saved)feishu_cache_protect(page_key,&s_message_pin);
+        saved=feishu_cache_write_if_scope(scope,page_key,frame,sizeof(*frame),1)==ESP_OK;
+        xSemaphoreTake(s_state_lock,portMAX_DELAY);
+        bool still_visible=applied && epoch==s_owner_epoch && request==s_state.message_page_request &&
+            s_state.nav.page==FEISHU_PAGE_MESSAGES && s_state.nav.chat_index==chat_index;
+        xSemaphoreGive(s_state_lock);
+        if(still_visible && saved)feishu_cache_protect(page_key,&s_message_pin);
         if(saved) {
             xSemaphoreTake(s_state_lock,portMAX_DELAY);
             feishu_utf8_copy(s_state.last_messages_chat,sizeof(s_state.last_messages_chat),chat_id);
@@ -317,6 +401,7 @@ static esp_err_t load_messages_for_chat(size_t chat_index, bool mark_seen,bool p
             xSemaphoreGive(s_state_lock);
         }
     }
+    if (applied && mark_seen && latest > 0) feishu_store_mark_seen(chat_id, latest);
     free(frame);
     xSemaphoreTake(s_state_lock,portMAX_DELAY);
     bool recent=!strcmp(s_state.last_messages_chat,chat_id) &&
@@ -724,7 +809,7 @@ done:
 static void recover_revoked_auth(esp_err_t err)
 {
     if(err==FEISHU_ERR_APP_REJECTED) {
-        set_status("应用凭据失效，请在设置重新授权",false);return;
+        set_status("BOT凭据失效，请在设置重新授权",false);return;
     }
     if (err != FEISHU_ERR_AUTH_REVOKED) return;
     // Keep the owner app and Wi-Fi; onboarding can request a new QR.
@@ -1085,10 +1170,12 @@ static void cache_worker_task(void *unused)
         /* Capture selection after receiving the request. */
         xSemaphoreTake(s_state_lock,portMAX_DELAY);
         index=s_state.nav.chat_index;
+        uint32_t request=s_state.message_page_request;
         xSemaphoreGive(s_state_lock);
         esp_err_t err=load_messages_for_chat(index,true,true);
         xSemaphoreTake(s_state_lock,portMAX_DELAY);
-        bool visible=s_state.nav.page==FEISHU_PAGE_MESSAGES;
+        bool visible=s_state.nav.page==FEISHU_PAGE_MESSAGES && s_state.nav.chat_index==index &&
+            request==s_state.message_page_request;
         xSemaphoreGive(s_state_lock);
         if(!visible) continue;
         if(err!=ESP_OK) {
@@ -1113,6 +1200,30 @@ static void start_cache_worker(void)
     if(!s_cache_done) s_cache_done=xSemaphoreCreateBinary();
     if(s_cache_queue && s_cache_done)
         xTaskCreate(cache_worker_task,"feishu_cache",8192,NULL,3,&s_cache_worker);
+}
+
+static esp_err_t reserve_audio_resources(void)
+{
+    unsigned before=(unsigned)esp_get_free_heap_size();TickType_t began=xTaskGetTickCount();
+    if(s_cache_worker) {
+        work_command_t exit=WORK_EXIT;
+        if(xQueueSendToFront(s_cache_queue,&exit,pdMS_TO_TICKS(1000))!=pdTRUE)return ESP_ERR_TIMEOUT;
+        xSemaphoreTake(s_cache_done,portMAX_DELAY);
+        xQueueReset(s_cache_queue);
+        /* FreeRTOS reaps a self-deleted task from idle, before codec allocation. */
+        vTaskDelay(pdMS_TO_TICKS(10));
+        xSemaphoreTake(s_state_lock,portMAX_DELAY);s_state.image_cache_queued=false;xSemaphoreGive(s_state_lock);
+    }
+    ESP_LOGI(TAG,"VOICE_RESERVE cache_worker=%u before=%u after=%u ms=%u",(unsigned)(s_cache_worker!=NULL),before,
+        (unsigned)esp_get_free_heap_size(),(unsigned)((xTaskGetTickCount()-began)*portTICK_PERIOD_MS));
+    return ESP_OK;
+}
+static void release_audio_resources(void)
+{
+    s_focus_audio_reserved=false;
+    xSemaphoreTake(s_state_lock,portMAX_DELAY);bool closing=s_state.closing;xSemaphoreGive(s_state_lock);
+    if(!closing)start_cache_worker();
+    ESP_LOGI(TAG,"VOICE_RELEASE cache_worker=%u heap=%u",(unsigned)(s_cache_worker!=NULL),(unsigned)esp_get_free_heap_size());
 }
 
 static void fetch_current_text(void)
@@ -1168,13 +1279,263 @@ static void fetch_current_text(void)
     recover_revoked_auth(err);
 }
 
+static esp_err_t send_pending_reply(void)
+{
+    esp_err_t err=ESP_OK;
+            feishu_outbox_t pending;int slot;bool retry;uint32_t send_epoch;
+            xSemaphoreTake(s_state_lock,portMAX_DELAY);
+            bool wanted=s_state.sending;
+            pending=s_state.pending;slot=s_state.pending_slot;retry=s_state.pending_retry_warning;send_epoch=s_owner_epoch;
+            if(!wanted && s_state.recovering_operation)s_state.loading=s_state.recovering_operation=false;
+            xSemaphoreGive(s_state_lock);
+            if(!wanted)return ESP_OK;
+            bool memory=slot==RAM_REPLY_SLOT;
+            if(memory) {
+                char text[FEISHU_REPLY_MAX];bool paused;
+                xSemaphoreTake(s_state_lock,portMAX_DELAY);
+                feishu_utf8_copy(text,sizeof(text),s_state.reply);paused=s_state.cancel_send;
+                xSemaphoreGive(s_state_lock);
+                if(paused)err=FEISHU_HTTP_ERR_CANCELLED;
+                else if(!text[0] || strlen(text)!=pending.length || !pending.chat[0] || !pending.uuid[0])err=ESP_ERR_INVALID_STATE;
+                else {
+                    pending.state=FEISHU_OUTBOX_SENDING;
+                    err=pending.message[0] ? feishu_api_reply_text(&s_session,pending.message,text,pending.uuid):
+                        feishu_api_send_text(&s_session,pending.chat,text,pending.uuid);
+                    pending.state=err==ESP_OK ? FEISHU_OUTBOX_EMPTY:FEISHU_OUTBOX_UNCERTAIN;
+                }
+                memset(text,0,sizeof(text));
+            } else if(slot<0 || !feishu_outbox_valid(&pending))err=ESP_ERR_INVALID_STATE;
+            while(!memory && err==ESP_OK && pending.state!=FEISHU_OUTBOX_EMPTY) {
+                xSemaphoreTake(s_state_lock,portMAX_DELAY);
+                bool paused=s_state.cancel_send;
+                xSemaphoreGive(s_state_lock);
+                if(paused) {err=ESP_ERR_INVALID_STATE;break;}
+                if(!feishu_outbox_attempt(&pending,retry)) {err=ESP_ERR_INVALID_STATE;break;}
+                /* Persist intent before any POST. A reboot leaves an uncertain
+                 * operation requiring explicit user review, never auto-replay. */
+                err=feishu_cache_pending_write((unsigned)slot,&pending,NULL);
+                if(err!=ESP_OK)break;
+                uint64_t sent=0;bool rejected=false;
+                err=feishu_api_send_pending_part(&s_session,&pending,&sent,&rejected);
+                if(err==ESP_OK) {
+                    if(!feishu_outbox_ack(&pending,sent)) {err=ESP_ERR_INVALID_RESPONSE;break;}
+                    err=feishu_cache_pending_write((unsigned)slot,&pending,NULL);
+                } else {
+                    feishu_outbox_failed(&pending,rejected);
+                    (void)feishu_cache_pending_write((unsigned)slot,&pending,NULL);
+                }
+                xSemaphoreTake(s_state_lock,portMAX_DELAY);
+                bool closing_now=s_state.closing;
+                paused=s_state.cancel_send;
+                xSemaphoreGive(s_state_lock);
+                if((closing_now || paused) && err==ESP_OK && pending.state!=FEISHU_OUTBOX_EMPTY)err=ESP_ERR_INVALID_STATE;
+                retry=false;
+                if(err==ESP_OK && pending.state!=FEISHU_OUTBOX_EMPTY)vTaskDelay(pdMS_TO_TICKS(250));
+            }
+            /* Reload durable truth if publication after a successful POST
+             * failed; an in-RAM ACK must not authorize a later automatic retry. */
+            feishu_outbox_t durable;
+            if(slot>=0 && feishu_cache_pending_read((unsigned)slot,&durable)==ESP_OK)pending=durable;
+            xSemaphoreTake(s_state_lock,portMAX_DELAY);
+            if(send_epoch!=s_owner_epoch) {
+                s_state.loading=s_state.sending=s_state.recovering_operation=false;xSemaphoreGive(s_state_lock);return FEISHU_HTTP_ERR_CANCELLED;
+            }
+            bool replied=s_state.pending.message[0]!=0;
+            s_state.loading=false;s_state.sending=false;s_state.pending_retry_warning=false;
+            if(err==ESP_OK) {
+                s_state.nav.page=s_state.nav.draft_manager ? FEISHU_PAGE_DRAFTS:FEISHU_PAGE_MESSAGES;s_state.pending_slot=-1;
+                memset(&s_state.pending,0,sizeof(s_state.pending));
+                s_state.reply[0]=s_state.reply_uuid[0]=0;
+                feishu_utf8_copy(s_state.status,sizeof(s_state.status),replied ? "回复已发送":"消息已发送");
+                if(!s_state.nav.draft_manager && s_state.nav.chat_index<s_state.nav.chat_count &&
+                   !strcmp(s_state.chats[s_state.nav.chat_index].chat_id,pending.chat)) {
+                    /* A successful send returns to the latest server page,
+                     * never to the old RAM snapshot or an older page cursor. */
+                    ++s_state.message_page_request;
+                    s_state.message_page_number=0;s_state.message_page_more=false;
+                    s_state.message_page_key[0]=0;s_state.last_messages_chat[0]=0;
+                    s_state.nav.composer_selected=true;
+                }
+            } else {
+                s_state.pending=pending;s_state.nav.page=FEISHU_PAGE_REVIEW;
+                feishu_utf8_copy(s_state.status,sizeof(s_state.status),pending.state==FEISHU_OUTBOX_READY ?
+                    (s_state.cancel_send ? "已暂停，已发送进度及剩余文字保留":"发送未完成，已发送进度及剩余文字保留"):
+                    "发送结果未确认，请先查看飞书，重试可能重复");
+            }
+            xSemaphoreGive(s_state_lock);
+            if(err==ESP_OK && !memory)list_pending_drafts();
+            if(err==ESP_OK)enqueue(WORK_REFRESH_MESSAGES);
+
+    return err;
+}
+
+#ifdef FEISHU_SEND_PERF_AUTOTEST
+
+#include "business_autotest_config.h"
+/* Verify the actual ASR writer -> durable draft -> rendered review -> send path.
+ * Only a free slot and the explicitly configured diagnostic chat are used. */
+static bool __attribute__((noinline)) voice_persist_send_autotest(void)
+{
+    volatile bool stop=false,cancel=false;volatile unsigned elapsed=0;
+    char recognition[FEISHU_REPLY_MAX]={0},expected[FEISHU_REPLY_MAX],uuid[41],name[64];
+    feishu_data_writer_t body={0};feishu_outbox_t pending={0},check={0};
+    int slot=-1;esp_err_t err=ESP_OK;bool durable=false,review=false;
+    for(unsigned i=0;i<FEISHU_OUTBOX_SLOTS;++i) {
+        esp_err_t found=feishu_cache_pending_read(i,&check);
+        if(found==ESP_ERR_NOT_FOUND){slot=(int)i;break;}
+        if(found!=ESP_OK){err=found;goto finished;}
+    }
+    if(slot<0){err=ESP_ERR_INVALID_STATE;goto finished;}
+    feishu_asr_autotest_prepare(&stop,&cancel);
+    err=feishu_asr_record(&s_session,&stop,&cancel,&elapsed,recognition,sizeof(recognition),&body,NULL);
+    feishu_asr_autotest_finish();
+    if(err!=ESP_OK)goto finished;
+    if(strcmp(recognition,BUSINESS_VOICE_EXPECTED)){err=ESP_ERR_INVALID_RESPONSE;goto finished;}
+    /* ASR has already written the final short block. The text-range writer
+     * rejects appending after that tail; test its actual output unchanged.
+     * The xiaotest_ metadata namespace identifies this disposable test. */
+    if(body.raw!=strlen(recognition)){err=ESP_ERR_INVALID_RESPONSE;goto finished;}
+    snprintf(expected,sizeof(expected),"%s",recognition);
+    make_reply_uuid(uuid);snprintf(name,sizeof(name),"xiaotest_%s",uuid);
+    if(!feishu_outbox_create(&pending,body.id,body.raw,name,BUSINESS_CHAT,"",uuid)){err=ESP_ERR_INVALID_RESPONSE;goto finished;}
+    err=feishu_cache_pending_write((unsigned)slot,&pending,&body);if(err!=ESP_OK)goto finished;durable=true;
+    err=feishu_cache_pending_read((unsigned)slot,&check);if(err!=ESP_OK)goto finished;
+    if(strcmp(check.uuid,uuid) || check.length!=strlen(expected)){err=ESP_ERR_INVALID_RESPONSE;goto finished;}
+    xSemaphoreTake(s_state_lock,portMAX_DELAY);
+    s_state.pending=check;s_state.pending_slot=slot;s_state.nav.page=FEISHU_PAGE_REVIEW;
+    s_state.nav.draft_manager=false;s_state.nav.reply_to_message=false;s_state.detail_page=0;
+    s_state.detail_loaded=false;s_state.loading=true;s_state.status[0]=0;
+    xSemaphoreGive(s_state_lock);
+    load_draft_page();vTaskDelay(pdMS_TO_TICKS(250));
+    if(bsp_lvgl_lock(1000)) {
+        review=!strcmp(lv_label_get_text(s_content),expected);
+        bsp_lvgl_unlock();
+    }
+    if(!review){err=ESP_ERR_INVALID_RESPONSE;goto finished;}
+    feishu_cache_unpin(&s_text_pin);
+    xSemaphoreTake(s_state_lock,portMAX_DELAY);
+    size_t test_chat=s_state.nav.chat_count;
+    for(size_t i=0;i<s_state.nav.chat_count;++i)if(!strcmp(s_state.chats[i].chat_id,BUSINESS_CHAT)){test_chat=i;break;}
+    if(test_chat<s_state.nav.chat_count) {
+        s_state.nav.chat_index=test_chat;s_state.sending=true;s_state.cancel_send=false;
+        s_state.nav.composer_selected=true;s_state.nav.draft_manager=false;
+    }
+    xSemaphoreGive(s_state_lock);
+    if(test_chat>=s_state.nav.chat_count){err=ESP_ERR_NOT_FOUND;goto finished;}
+    err=send_pending_reply();
+    if(err==ESP_OK)err=load_messages_for_chat(test_chat,false,false);
+    bool found=false;
+    xSemaphoreTake(s_state_lock,portMAX_DELAY);
+    for(size_t i=0;i<s_state.nav.message_count;++i)if(!strcmp(s_state.messages[i].text,expected))found=true;
+    bool current=s_state.nav.page==FEISHU_PAGE_MESSAGES && !s_state.loading && s_state.nav.composer_selected;
+    xSemaphoreGive(s_state_lock);
+    ESP_LOGI(TAG,"POST_SEND_UI pass=%u newest_visible=%u current_page=%u",(unsigned)(found&&current),(unsigned)found,(unsigned)current);
+    if(!found || !current)err=ESP_ERR_INVALID_RESPONSE;
+
+finished:
+    feishu_asr_autotest_finish();
+    feishu_cache_text_abort(&body);feishu_cache_unpin(&s_text_pin);
+    ESP_LOGI(TAG,"VOICE_PERSIST_SEND pass=%u err=%d durable=%u review_exact=%u slot=%d bytes=%u",
+        (unsigned)(err==ESP_OK),(int)err,(unsigned)durable,(unsigned)review,slot,(unsigned)pending.length);
+    return err==ESP_OK;
+}
+/* Device-only UI data-path exercise: two conversations, then disk hits after
+ * switching away. No extra sends, no draft/config deletion, no private IDs. */
+static void __attribute__((noinline)) latency_ui_autotest(void)
+{
+    xSemaphoreTake(s_state_lock,portMAX_DELAY);
+    size_t count=s_state.nav.chat_count<2 ? s_state.nav.chat_count:2;
+    xSemaphoreGive(s_state_lock);
+    unsigned passed=0;
+    for(unsigned round=0;round<2;++round)for(size_t i=0;i<count;++i) {
+        xSemaphoreTake(s_state_lock,portMAX_DELAY);
+        s_state.nav.page=FEISHU_PAGE_MESSAGES;s_state.nav.chat_index=i;
+        ++s_state.message_page_request;s_state.loading=true;
+        /* Require a durable snapshot rather than a RAM self-hit. */
+        if(round)s_state.loaded_chat[0]=0;
+        xSemaphoreGive(s_state_lock);
+        TickType_t began=xTaskGetTickCount();
+        esp_err_t result=load_messages_for_chat(i,false,round!=0);
+        xSemaphoreTake(s_state_lock,portMAX_DELAY);
+        bool shown=result==ESP_OK && !s_state.loading &&
+            !strcmp(s_state.loaded_chat,s_state.chats[i].chat_id);
+        xSemaphoreGive(s_state_lock);
+        passed+=shown;
+        ESP_LOGI(TAG,"LATENCY_UI round=%u chat=%u pass=%u ms=%u err=%d",round,(unsigned)i,
+            (unsigned)shown,(unsigned)((xTaskGetTickCount()-began)*portTICK_PERIOD_MS),result);
+    }
+    bool voice=voice_persist_send_autotest();
+    /* Same focus handler as the ordinary worker, with real HTTPS in parallel
+     * with discarded microphone samples. Never sends additional messages. */
+    unsigned focus_passed=0;unsigned focus_heap=esp_get_free_heap_size();
+    for(unsigned cycle=0;cycle<3;++cycle) {
+        xSemaphoreTake(s_state_lock,portMAX_DELAY);
+        size_t index=s_state.nav.chat_index;
+        s_state.nav.page=FEISHU_PAGE_MESSAGES;s_state.nav.composer_selected=true;s_state.loading=false;
+        xSemaphoreGive(s_state_lock);
+        apply_audio_focus();
+        for(unsigned i=0;i<300 && !feishu_asr_prepare_ready();++i)vTaskDelay(pdMS_TO_TICKS(10));
+        bool ready=feishu_asr_prepare_ready();
+        esp_err_t refreshed=load_messages_for_chat(index,false,false);
+        xSemaphoreTake(s_state_lock,portMAX_DELAY);
+        s_state.nav.composer_selected=false;
+        xSemaphoreGive(s_state_lock);
+        sync_audio_focus();apply_audio_focus();vTaskDelay(pdMS_TO_TICKS(20));
+        bool released=!feishu_asr_prepare_ready();
+        bool pass=ready && refreshed==ESP_OK && released;
+        focus_passed+=pass;
+        ESP_LOGI(TAG,"FOCUS_PREWARM cycle=%u pass=%u ready=%u refresh=%d released=%u before=%u after=%u minimum=%u",
+            cycle,(unsigned)pass,(unsigned)ready,refreshed,(unsigned)released,focus_heap,
+            (unsigned)esp_get_free_heap_size(),(unsigned)esp_get_minimum_free_heap_size());
+    }
+    ESP_LOGI(TAG,"LATENCY_UI_DONE pass=%u checks=%u expected=%u",
+        (unsigned)(count==2 && passed==4 && voice && focus_passed==3),passed,(unsigned)(count*2));
+}
+#endif
+
+#ifdef FEISHU_MEMORY_DIAGNOSTIC
+#include "../tools/memory_probe/memory_probe.inc"
+#endif
+#ifdef FEISHU_MCP_DIAGNOSTIC
+static void mcp_device_probe(void)
+{
+    (void)feishu_asr_prepare(false);
+    esp_err_t err=reserve_audio_resources();
+    if(err==ESP_OK) {
+        xSemaphoreTake(s_state_lock,portMAX_DELAY);
+        s_state.nav.page=FEISHU_PAGE_STATUS;s_state.loading=false;
+        feishu_utf8_copy(s_state.status,sizeof(s_state.status),"自动协议检查，保持静音");
+        feishu_mcp_status_t snapshot={"status",(unsigned)s_state.nav.chat_count,
+            (unsigned)s_state.nav.message_count,s_state.battery_percent,feishu_network_connected()};
+        char chat[FEISHU_CHAT_ID_MAX];feishu_utf8_copy(chat,sizeof(chat),s_state.chats[0].chat_id);
+        xSemaphoreGive(s_state_lock);
+        err=feishu_asr_mcp_probe(&s_session,chat,&snapshot);
+    }
+    release_audio_resources();
+    ESP_LOGI(TAG,"MCP_DEVICE_DONE pass=%u result=%d heap=%u minimum=%u",(unsigned)(err==ESP_OK),err,
+        (unsigned)esp_get_free_heap_size(),(unsigned)esp_get_minimum_free_heap_size());
+}
+#endif
+
+#include "feishu_network_ui.inc"
+#ifdef FEISHU_NETWORK_UI_AUTOTEST
+#include "../tools/ui_probe/network_ui.inc"
+#endif
+
 static void worker_task(void *argument)
 {
     (void)argument;
     work_command_t command;
-    TickType_t last_chat_refresh = 0;
+    TickType_t last_chat_refresh = 0,last_battery=0;
 
     for (;;) {
+        if(!last_battery || xTaskGetTickCount()-last_battery>=pdMS_TO_TICKS(15000)) {
+            int percent=bsp_battery_soc();
+            if(percent<0 && bsp_battery_init()==ESP_OK)percent=bsp_battery_soc();
+            xSemaphoreTake(s_state_lock,portMAX_DELAY);s_state.battery_percent=percent;xSemaphoreGive(s_state_lock);
+            ESP_LOGI(TAG,"BATTERY_SAMPLE soc=%d mv=%d",percent,bsp_battery_mv());
+            last_battery=xTaskGetTickCount();
+        }
         if (xQueueReceive(s_work_queue, &command,
                           pdMS_TO_TICKS(8000)) != pdTRUE) {
             feishu_page_t page;
@@ -1182,8 +1543,6 @@ static void worker_task(void *argument)
             bool ready;
             bool initialized;
             xSemaphoreTake(s_state_lock, portMAX_DELAY);
-            int battery_percent = bsp_battery_soc();
-            if (battery_percent >= 0) s_state.battery_percent = battery_percent;
             initialized = s_state.ready;
             ready = initialized && !s_state.loading;
             page = s_state.nav.page;
@@ -1208,6 +1567,7 @@ static void worker_task(void *argument)
             // Failed initialization previously left every key disabled forever.
             // Retry only initialization, never replay a queued send/record action.
             if (initialized && online()) continue;
+            if(feishu_network_user_offline())continue;
             xSemaphoreTake(s_state_lock, portMAX_DELAY);
             s_state.loading = !initialized;
             xSemaphoreGive(s_state_lock);
@@ -1226,11 +1586,38 @@ static void worker_task(void *argument)
             xSemaphoreGive(s_state_lock);
             continue;
         }
-        if (command == WORK_INIT) {
+        if(command==WORK_CHECK_XIAOZHI) {
+            xSemaphoreTake(s_state_lock,portMAX_DELAY);
+            uint32_t request=s_state.pairing_request;
+            bool active=s_state.nav.page==FEISHU_PAGE_XIAOZHI && !s_state.cancel_pairing;
+            xSemaphoreGive(s_state_lock);
+            if(!active)continue;
+            feishu_asr_pairing_t info;
+            err=feishu_network_connected() ? feishu_asr_pairing_check(&info,&s_state.cancel_pairing):ESP_ERR_INVALID_STATE;
+            xSemaphoreTake(s_state_lock,portMAX_DELAY);
+            bool wanted=s_state.nav.page==FEISHU_PAGE_XIAOZHI && !s_state.cancel_pairing && request==s_state.pairing_request;
+            if(request==s_state.pairing_request)s_state.pairing_busy=false;
+            if(wanted) {
+                s_state.pairing_retry_at=(uint32_t)(esp_timer_get_time()/1000)+30000;
+                s_state.pairing_auto_blocked=err==ESP_ERR_NOT_SUPPORTED;
+                if(err==ESP_OK) {
+                    s_state.pairing=info;
+                    feishu_utf8_copy(s_state.status,sizeof(s_state.status),info.paired ? "配对已完成，长按返回":info.code[0] ? "请在小智控制台添加设备":"未取得设备码，确定重试");
+                } else {
+                    s_state.pairing.paired=false;
+                    feishu_utf8_copy(s_state.status,sizeof(s_state.status),err==ESP_ERR_NOT_SUPPORTED ? "当前固件未启用小智语音":"刷新失败，确定可重试");
+                }
+            } else err=FEISHU_HTTP_ERR_CANCELLED;
+            xSemaphoreGive(s_state_lock);
+        } else if (command == WORK_INIT) {
             start_cache_worker();
             xSemaphoreTake(s_state_lock,portMAX_DELAY);uint32_t init_request=s_state.chat_page_request;xSemaphoreGive(s_state_lock);
             err = initialize_feishu();
             if (err != ESP_OK) ESP_LOGW(TAG, "initialization failed: %s", esp_err_to_name(err));
+#ifdef FEISHU_VOICE_AUTOTEST
+            ESP_LOGI(TAG,"INIT_READY result=%d heap=%u largest=%u",err,(unsigned)esp_get_free_heap_size(),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT));
+#endif
             xSemaphoreTake(s_state_lock, portMAX_DELAY);
             bool cached_ready=s_state.ready;
             bool home=s_state.nav.page==FEISHU_PAGE_CHATS && s_state.chat_page_number==0 &&
@@ -1246,6 +1633,16 @@ static void worker_task(void *argument)
             }
             xSemaphoreGive(s_state_lock);
             if (err == ESP_OK && home) {
+#ifdef FEISHU_MCP_DIAGNOSTIC
+                static bool mcp_tested;
+                if(!mcp_tested){mcp_tested=true;mcp_device_probe();continue;}
+#endif
+#ifdef FEISHU_MEMORY_DIAGNOSTIC
+                static bool memory_tested;
+                if(!memory_tested && err==ESP_OK) {
+                    memory_tested=true;memory_probe();continue;
+                }
+#endif
 #ifdef FEISHU_VOICE_AUTOTEST
                 /* Run after normal initialization/UI allocation, before slow
                  * optional summary enrichment can consume the probe window. */
@@ -1263,7 +1660,7 @@ static void worker_task(void *argument)
 #endif
 #elif defined(FEISHU_BUSINESS_AUTOTEST)
 #ifdef FEISHU_SEND_PERF_AUTOTEST
-                    feishu_business_autotest(&s_session);continue;
+                    feishu_business_autotest(&s_session);latency_ui_autotest();continue;
 #else
                     if(feishu_asr_autotest_provision())feishu_business_autotest(&s_session);
                     else ESP_LOGI(TAG,"BUSINESS_DONE pass=0 voice_provision_failed=1");
@@ -1306,12 +1703,15 @@ static void worker_task(void *argument)
             err=load_message_page(true);
         } else if(command==WORK_FETCH_TEXT) {
             fetch_current_text();
+        } else if(command==WORK_AUDIO_FOCUS) {
+            atomic_store(&s_audio_focus_queued,false);
+            apply_audio_focus();
         } else if (command == WORK_REFRESH_MESSAGES) {
             xSemaphoreTake(s_state_lock,portMAX_DELAY);
             bool visible=s_state.nav.page==FEISHU_PAGE_MESSAGES;
             size_t index=s_state.nav.chat_index;
             xSemaphoreGive(s_state_lock);
-            if(visible && online() && uxQueueMessagesWaiting(s_work_queue)==0) {
+            if(visible && online()) {
                 err=load_messages_for_chat(index,true,false);
                 if(err!=ESP_OK) {
                     xSemaphoreTake(s_state_lock,portMAX_DELAY);
@@ -1452,6 +1852,13 @@ static void worker_task(void *argument)
                     err==ESP_ERR_NO_MEM ? "录音资源暂不足，返回列表后重试":
                     err==ESP_ERR_NOT_FOUND ? "没有识别到语音，请重试":"识别或保存失败，原有草稿保留");
             }
+            if(!cancelled && err==FEISHU_ERR_XIAO_PAIRING) {
+                feishu_asr_pairing_snapshot(&s_state.pairing);
+                s_state.pairing_return_page=s_state.record_replaces_pending ? FEISHU_PAGE_REVIEW:FEISHU_PAGE_MESSAGES;
+                s_state.nav.page=FEISHU_PAGE_XIAOZHI;s_state.cancel_pairing=false;s_state.status_error=false;s_state.pairing_auto_blocked=false;s_state.pairing_retry_at=0;
+                feishu_utf8_copy(s_state.status,sizeof(s_state.status),"请先在小智控制台完成配对");
+                err=ESP_OK;
+            }
             xSemaphoreGive(s_state_lock);
 #ifdef FEISHU_VOICE_AUTOTEST
             if(s_voice_ui_probe) {
@@ -1504,86 +1911,20 @@ static void worker_task(void *argument)
             xSemaphoreGive(s_state_lock);
             if(err==ESP_OK && slot!=RAM_REPLY_SLOT)list_pending_drafts();
         } else if (command == WORK_SEND) {
-            feishu_outbox_t pending;int slot;bool retry;uint32_t send_epoch;
-            xSemaphoreTake(s_state_lock,portMAX_DELAY);
-            bool wanted=s_state.sending;
-            pending=s_state.pending;slot=s_state.pending_slot;retry=s_state.pending_retry_warning;send_epoch=s_owner_epoch;
-            if(!wanted && s_state.recovering_operation)s_state.loading=s_state.recovering_operation=false;
-            xSemaphoreGive(s_state_lock);
-            if(!wanted)continue;
-            bool memory=slot==RAM_REPLY_SLOT;
-            if(memory) {
-                char text[FEISHU_REPLY_MAX];bool paused;
-                xSemaphoreTake(s_state_lock,portMAX_DELAY);
-                feishu_utf8_copy(text,sizeof(text),s_state.reply);paused=s_state.cancel_send;
-                xSemaphoreGive(s_state_lock);
-                if(paused)err=FEISHU_HTTP_ERR_CANCELLED;
-                else if(!text[0] || strlen(text)!=pending.length || !pending.chat[0] || !pending.uuid[0])err=ESP_ERR_INVALID_STATE;
-                else {
-                    pending.state=FEISHU_OUTBOX_SENDING;
-                    err=pending.message[0] ? feishu_api_reply_text(&s_session,pending.message,text,pending.uuid):
-                        feishu_api_send_text(&s_session,pending.chat,text,pending.uuid);
-                    pending.state=err==ESP_OK ? FEISHU_OUTBOX_EMPTY:FEISHU_OUTBOX_UNCERTAIN;
-                }
-                memset(text,0,sizeof(text));
-            } else if(slot<0 || !feishu_outbox_valid(&pending))err=ESP_ERR_INVALID_STATE;
-            while(!memory && err==ESP_OK && pending.state!=FEISHU_OUTBOX_EMPTY) {
-                xSemaphoreTake(s_state_lock,portMAX_DELAY);
-                bool paused=s_state.cancel_send;
-                xSemaphoreGive(s_state_lock);
-                if(paused) {err=ESP_ERR_INVALID_STATE;break;}
-                if(!feishu_outbox_attempt(&pending,retry)) {err=ESP_ERR_INVALID_STATE;break;}
-                /* Persist intent before any POST. A reboot leaves an uncertain
-                 * operation requiring explicit user review, never auto-replay. */
-                err=feishu_cache_pending_write((unsigned)slot,&pending,NULL);
-                if(err!=ESP_OK)break;
-                uint64_t sent=0;bool rejected=false;
-                err=feishu_api_send_pending_part(&s_session,&pending,&sent,&rejected);
-                if(err==ESP_OK) {
-                    if(!feishu_outbox_ack(&pending,sent)) {err=ESP_ERR_INVALID_RESPONSE;break;}
-                    err=feishu_cache_pending_write((unsigned)slot,&pending,NULL);
-                } else {
-                    feishu_outbox_failed(&pending,rejected);
-                    (void)feishu_cache_pending_write((unsigned)slot,&pending,NULL);
-                }
-                xSemaphoreTake(s_state_lock,portMAX_DELAY);
-                bool closing_now=s_state.closing;
-                paused=s_state.cancel_send;
-                xSemaphoreGive(s_state_lock);
-                if((closing_now || paused) && err==ESP_OK && pending.state!=FEISHU_OUTBOX_EMPTY)err=ESP_ERR_INVALID_STATE;
-                retry=false;
-                if(err==ESP_OK && pending.state!=FEISHU_OUTBOX_EMPTY)vTaskDelay(pdMS_TO_TICKS(250));
-            }
-            /* Reload durable truth if publication after a successful POST
-             * failed; an in-RAM ACK must not authorize a later automatic retry. */
-            feishu_outbox_t durable;
-            if(slot>=0 && feishu_cache_pending_read((unsigned)slot,&durable)==ESP_OK)pending=durable;
-            xSemaphoreTake(s_state_lock,portMAX_DELAY);
-            if(send_epoch!=s_owner_epoch) {
-                s_state.loading=s_state.sending=s_state.recovering_operation=false;xSemaphoreGive(s_state_lock);continue;
-            }
-            bool replied=s_state.pending.message[0]!=0;
-            s_state.loading=false;s_state.sending=false;s_state.pending_retry_warning=false;
-            if(err==ESP_OK) {
-                s_state.nav.page=s_state.nav.draft_manager ? FEISHU_PAGE_DRAFTS:FEISHU_PAGE_MESSAGES;s_state.pending_slot=-1;
-                memset(&s_state.pending,0,sizeof(s_state.pending));
-                s_state.reply[0]=s_state.reply_uuid[0]=0;
-                feishu_utf8_copy(s_state.status,sizeof(s_state.status),replied ? "回复已发送":"消息已发送");
-            } else {
-                s_state.pending=pending;s_state.nav.page=FEISHU_PAGE_REVIEW;
-                feishu_utf8_copy(s_state.status,sizeof(s_state.status),pending.state==FEISHU_OUTBOX_READY ?
-                    (s_state.cancel_send ? "已暂停，已发送进度及剩余文字保留":"发送未完成，已发送进度及剩余文字保留"):
-                    "发送结果未确认，请先查看飞书，重试可能重复");
-            }
-            xSemaphoreGive(s_state_lock);
-            if(err==ESP_OK && !memory)list_pending_drafts();
+            err=send_pending_reply();
+        }
+#ifdef FEISHU_NETWORK_UI_AUTOTEST
+        else if(command==WORK_NETWORK_AUTOTEST) {network_ui_autotest();}
+#endif
+        else if(command==WORK_NETWORK_LIST || command==WORK_NETWORK_SCAN || command==WORK_NETWORK_CONNECT ||
+                command==WORK_NETWORK_DISCONNECT || command==WORK_NETWORK_REMOVE || command==WORK_NETWORK_EDIT || command==WORK_NETWORK_PASSWORD_SAVE) {
+            network_work(command);
         } else if (command == WORK_RESET_WIFI) {
             err=feishu_store_require_wifi_setup(true);
             if(err!=ESP_OK) {
                 set_status("无法保存配网请求，请稍后重试",false);
                 continue;
             }
-            feishu_network_forget_wifi();
             ESP_LOGI(TAG, "Wi-Fi reset requested: %s", esp_err_to_name(err));
             vTaskDelay(pdMS_TO_TICKS(300));
             esp_restart();
@@ -1602,7 +1943,11 @@ static void worker_task(void *argument)
         xSemaphoreGive(s_state_lock);
         recover_revoked_auth(err);
     }
+    feishu_asr_prepare_cancel();
+    (void)feishu_asr_prepare(false);
+    s_focus_audio_reserved=false;
     if(s_cache_worker) xSemaphoreTake(s_cache_done,portMAX_DELAY);
+    save_read_position();
     feishu_cache_unpin(&s_chat_pin);
     feishu_cache_unpin(&s_message_pin);
     feishu_cache_unpin(&s_text_pin);
@@ -1632,14 +1977,7 @@ static size_t visible_start(size_t selected, size_t count)
     return start;
 }
 
-static size_t message_visible_start(size_t selected, size_t count)
-{
-    if (count <= FEISHU_MESSAGE_ROWS) return 0;
-    size_t start = selected >= FEISHU_MESSAGE_ROWS - 1 ?
-                   selected - (FEISHU_MESSAGE_ROWS - 1) : 0;
-    if (start + FEISHU_MESSAGE_ROWS > count) start = count - FEISHU_MESSAGE_ROWS;
-    return start;
-}
+
 
 static void show_list_rows(bool visible)
 {
@@ -1656,14 +1994,49 @@ static void style_list_row(size_t slot, bool selected)
     // A restrained navy surface keeps each row readable; focus is expressed
     // only by the high-contrast yellow key-navigation outline.
     lv_obj_set_style_bg_opa(s_rows[slot],
-                            selected ? LV_OPA_COVER : LV_OPA_50, 0);
+                            LV_OPA_COVER, 0);
     lv_obj_set_style_bg_color(s_rows[slot],
-        lv_color_hex(selected ? 0x142B43 : 0x102238), 0);
+        lv_color_hex(selected ? FEISHU_SURFACE_FOCUS : FEISHU_SURFACE), 0);
     lv_obj_set_style_border_width(s_rows[slot], selected ? 2 : 0, 0);
-    lv_obj_set_style_border_color(s_rows[slot], lv_color_hex(UI_YELLOW), 0);
-    lv_obj_set_style_radius(s_rows[slot], 10, 0);
-    lv_obj_set_style_text_color(s_row_text[slot], lv_color_hex(UI_PAPER), 0);
-    lv_obj_set_style_bg_color(s_row_mark[slot], lv_color_hex(UI_RED), 0);
+    lv_obj_set_style_border_color(s_rows[slot], lv_color_hex(FEISHU_FOCUS), 0);
+    lv_obj_set_style_radius(s_rows[slot], 6, 0);
+    lv_obj_set_style_text_color(s_row_text[slot], lv_color_hex(FEISHU_TEXT), 0);
+    lv_obj_set_style_bg_color(s_row_mark[slot], lv_color_hex(FEISHU_ERROR), 0);
+}
+
+/* All business action menus reuse the settings row objects and focus style. */
+static void render_choice_rows(const char *const *labels,size_t count,size_t selected,bool multiline)
+{
+    show_list_rows(true);
+    size_t start=visible_start(selected,count);
+    for(size_t slot=0;slot<FEISHU_VISIBLE_ROWS;++slot) {
+        size_t index=start+slot;
+        if(index>=count){lv_obj_add_flag(s_rows[slot],LV_OBJ_FLAG_HIDDEN);continue;}
+        lv_obj_remove_flag(s_rows[slot],LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_pos(s_rows[slot],10,FEISHU_CONTENT_TOP+(int)slot*(multiline ? 52:34));
+        lv_obj_set_size(s_rows[slot],220,multiline ? 46:29);
+        style_list_row(slot,index==selected);lv_obj_set_style_radius(s_rows[slot],8,0);
+        lv_obj_add_flag(s_row_avatar[slot],LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_row_subtext[slot],LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_size(s_row_text[slot],196,multiline ? 36:18);
+        lv_obj_set_style_pad_all(s_row_text[slot],0,0);lv_obj_set_style_bg_opa(s_row_text[slot],LV_OPA_TRANSP,0);
+        lv_obj_set_style_border_width(s_row_text[slot],0,0);lv_obj_set_style_text_align(s_row_text[slot],LV_TEXT_ALIGN_LEFT,0);
+        lv_obj_set_style_text_line_space(s_row_text[slot],1,0);
+        lv_label_set_long_mode(s_row_text[slot],multiline ? LV_LABEL_LONG_CLIP:LV_LABEL_LONG_DOT);
+        const char *detail=multiline ? strchr(labels[index],'\n'):NULL;
+        if(detail) {
+            char title[96];feishu_utf8_copy(title,sizeof(title),labels[index]);
+            char *newline=strchr(title,'\n');if(newline)*newline=0;
+            lv_obj_set_height(s_row_text[slot],18);set_label_text(s_row_text[slot],title);
+            lv_obj_align(s_row_text[slot],LV_ALIGN_TOP_LEFT,10,3);
+            lv_obj_remove_flag(s_row_subtext[slot],LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_size(s_row_subtext[slot],196,18);
+            lv_obj_set_style_text_color(s_row_subtext[slot],lv_color_hex(FEISHU_MUTED),0);
+            set_label_text(s_row_subtext[slot],detail+1);
+            lv_obj_align(s_row_subtext[slot],LV_ALIGN_TOP_LEFT,10,23);
+        } else {set_label_text(s_row_text[slot],labels[index]);lv_obj_align(s_row_text[slot],LV_ALIGN_LEFT_MID,10,0);}
+        set_label_text(s_row_mark[slot],"");lv_obj_set_style_bg_opa(s_row_mark[slot],LV_OPA_TRANSP,0);
+    }
 }
 
 static void render_chat_rows(void)
@@ -1677,8 +2050,8 @@ static void render_chat_rows(void)
         (unsigned)s_state.nav.chat_count);
     size_t start = visible_start(s_state.nav.chat_index, s_state.nav.chat_count);
     for (size_t slot = 0; slot < FEISHU_VISIBLE_ROWS; ++slot) {
-        lv_obj_set_pos(s_rows[slot], 10, 38 + (int)slot * 58);
-        lv_obj_set_size(s_rows[slot], 220, 54);
+        lv_obj_set_pos(s_rows[slot], 8, FEISHU_CONTENT_TOP + (int)slot * FEISHU_CHAT_STRIDE);
+        lv_obj_set_size(s_rows[slot], 224, FEISHU_CHAT_HEIGHT);
         size_t index = start + slot;
         if (index >= s_state.nav.chat_count) {
             lv_obj_add_flag(s_rows[slot], LV_OBJ_FLAG_HIDDEN);
@@ -1686,8 +2059,8 @@ static void render_chat_rows(void)
         }
         lv_obj_remove_flag(s_rows[slot], LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(s_row_avatar[slot], LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_pos(s_row_avatar[slot], 5, 7);
-        lv_obj_set_size(s_row_avatar[slot], 40, 40);
+        lv_obj_align(s_row_avatar[slot],LV_ALIGN_LEFT_MID,5,0);
+        lv_obj_set_size(s_row_avatar[slot], 28, 28);
         lv_obj_set_style_bg_color(s_row_avatar[slot],
             lv_color_hex(avatar_colors[index % 4]), 0);
         char avatar[5];
@@ -1696,8 +2069,8 @@ static void render_chat_rows(void)
         set_label_text(s_row_avatar_text[slot], avatar);
         lv_obj_center(s_row_avatar_text[slot]);
         lv_label_set_long_mode(s_row_text[slot],LV_LABEL_LONG_DOT);
-        lv_obj_align(s_row_text[slot],LV_ALIGN_TOP_LEFT,52,17);
-        lv_obj_set_size(s_row_text[slot], 142, 20);
+        lv_obj_align(s_row_text[slot],LV_ALIGN_LEFT_MID,42,0);
+        lv_obj_set_size(s_row_text[slot], 164, 20);
         lv_obj_set_style_bg_opa(s_row_text[slot], LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(s_row_text[slot], 0, 0);
         lv_obj_set_style_pad_all(s_row_text[slot], 0, 0);
@@ -1720,16 +2093,28 @@ static void render_message_rows(void)
     feishu_utf8_copy(chat_name, sizeof(chat_name),
                      s_state.chats[s_state.nav.chat_index].name);
     lv_label_set_text_fmt(s_title, "< %s", chat_name);
-    size_t start = message_visible_start(s_state.nav.message_index,
-                                         s_state.nav.message_count);
+    uint16_t heights[FEISHU_MAX_MESSAGES];
+    for(size_t i=0;i<s_state.nav.message_count;++i) {
+        char preview[91];
+        feishu_text_preview(preview,sizeof(preview),s_state.messages[i].text,
+            s_state.messages[i].text_truncated,22,2);
+        heights[i]=strchr(preview,'\n') ? 44:28;
+    }
+    size_t start=0;
+    size_t visible=feishu_message_window(heights,s_state.nav.message_count,
+        s_state.nav.composer_selected ? s_state.nav.message_count:s_state.nav.message_index,
+        190,FEISHU_MESSAGE_ROWS,&start);
+    int y=38;
     for (size_t slot = 0; slot < FEISHU_MESSAGE_ROWS; ++slot) {
-        lv_obj_set_pos(s_rows[slot], 10, 38 + (int)slot * 58);
-        lv_obj_set_size(s_rows[slot], 220, 54);
         size_t index = start + slot;
-        if (index >= s_state.nav.message_count) {
+        if (slot>=visible) {
             lv_obj_add_flag(s_rows[slot], LV_OBJ_FLAG_HIDDEN);
             continue;
         }
+        unsigned height=heights[index];
+        lv_obj_set_style_text_line_space(s_row_text[slot],3,0);
+        lv_obj_set_pos(s_rows[slot],10,y);lv_obj_set_size(s_rows[slot],220,height);
+        y+=(int)height+4;
         lv_obj_remove_flag(s_rows[slot], LV_OBJ_FLAG_HIDDEN);
         char message[91];
         feishu_text_preview(message,sizeof(message),s_state.messages[index].text,
@@ -1741,31 +2126,31 @@ static void render_message_rows(void)
         if (mine) lv_obj_add_flag(s_row_avatar[slot], LV_OBJ_FLAG_HIDDEN);
         else {
             lv_obj_remove_flag(s_row_avatar[slot], LV_OBJ_FLAG_HIDDEN);
-            lv_obj_set_pos(s_row_avatar[slot], 4, 8);
-            lv_obj_set_size(s_row_avatar[slot], 30, 30);
+            lv_obj_set_pos(s_row_avatar[slot], 4, ((int)height-26)/2);
+            lv_obj_set_size(s_row_avatar[slot], 26, 26);
             lv_obj_set_style_bg_color(s_row_avatar[slot],
-                                      lv_color_hex(UI_SKY_DARK), 0);
+                                      lv_color_hex(FEISHU_SURFACE_FOCUS), 0);
             char avatar[5];
             feishu_avatar_text(avatar, s_state.messages[index].sender_name, "他");
             set_label_text(s_row_avatar_text[slot], avatar);
         lv_obj_center(s_row_avatar_text[slot]);
         }
-        lv_obj_align(s_row_text[slot],LV_ALIGN_TOP_LEFT,mine ? 44 : 40,3);
-        lv_obj_set_size(s_row_text[slot], mine ? 168 : 172, 48);
+        lv_obj_align(s_row_text[slot],LV_ALIGN_TOP_LEFT,mine ? 44 : 40,0);
+        lv_obj_set_size(s_row_text[slot], mine ? 168 : 172, height);
         lv_obj_set_style_bg_opa(s_row_text[slot], LV_OPA_COVER, 0);
         lv_obj_set_style_bg_color(s_row_text[slot],
-            lv_color_hex(mine ? 0x2A8B55 : 0x24384E), 0);
+            lv_color_hex(mine ? 0x24504D : FEISHU_SURFACE), 0);
         lv_obj_set_style_text_color(s_row_text[slot],
-            lv_color_hex(UI_PAPER), 0);
+            lv_color_hex(FEISHU_TEXT), 0);
         lv_obj_set_style_text_align(s_row_text[slot],
             mine ? LV_TEXT_ALIGN_RIGHT : LV_TEXT_ALIGN_LEFT, 0);
-        lv_obj_set_style_pad_all(s_row_text[slot], 4, 0);
+        lv_obj_set_style_pad_all(s_row_text[slot], 2, 0);
         lv_obj_set_style_text_line_space(s_row_text[slot],1,0);
         lv_obj_set_style_radius(s_row_text[slot], 8, 0);
         lv_obj_set_style_border_width(s_row_text[slot],
                                       !s_state.nav.composer_selected && index == s_state.nav.message_index ? 2 : 0, 0);
         lv_obj_set_style_border_color(s_row_text[slot],
-                                      lv_color_hex(UI_YELLOW), 0);
+                                      lv_color_hex(FEISHU_FOCUS), 0);
         set_label_text(s_row_mark[slot], "");
         lv_obj_set_style_bg_opa(s_row_mark[slot], LV_OPA_TRANSP, 0);
         // The bubble itself already has the yellow focus outline. Keep the
@@ -1773,20 +2158,21 @@ static void render_message_rows(void)
         lv_obj_set_style_bg_opa(s_rows[slot], LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(s_rows[slot], 0, 0);
         // style_list_row sets the default text color; restore bubble contrast.
-        lv_obj_set_style_text_color(s_row_text[slot], lv_color_hex(UI_PAPER), 0);
+        lv_obj_set_style_text_color(s_row_text[slot], lv_color_hex(FEISHU_TEXT), 0);
     }
+    for(size_t i=FEISHU_MESSAGE_ROWS+1;i<FEISHU_VISIBLE_ROWS;++i)lv_obj_add_flag(s_rows[i],LV_OBJ_FLAG_HIDDEN);
     size_t slot = FEISHU_MESSAGE_ROWS;
     lv_obj_remove_flag(s_rows[slot], LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_row_avatar[slot], LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_row_subtext[slot], LV_OBJ_FLAG_HIDDEN);
-    lv_obj_set_pos(s_rows[slot], 18, 222);
-    lv_obj_set_size(s_rows[slot], 204, 42);
+    lv_obj_set_pos(s_rows[slot], 10, 234);
+    lv_obj_set_size(s_rows[slot], 220, 32);
     lv_obj_set_style_bg_opa(s_rows[slot], LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(s_rows[slot], lv_color_hex(0x102B44), 0);
+    lv_obj_set_style_bg_color(s_rows[slot], lv_color_hex(FEISHU_SURFACE), 0);
     lv_obj_set_style_border_width(s_rows[slot],
                                   s_state.nav.composer_selected ? 2 : 1, 0);
     lv_obj_set_style_border_color(s_rows[slot], lv_color_hex(
-        s_state.nav.composer_selected ? UI_YELLOW : 0x34506A), 0);
+        s_state.nav.composer_selected ? FEISHU_FOCUS : FEISHU_RULE), 0);
     lv_obj_set_style_radius(s_rows[slot], 12, 0);
     lv_obj_set_width(s_row_text[slot],188);
     lv_obj_set_height(s_row_text[slot],LV_SIZE_CONTENT);
@@ -1795,11 +2181,35 @@ static void render_message_rows(void)
     lv_obj_set_style_border_width(s_row_text[slot], 0, 0);
     lv_obj_set_style_pad_all(s_row_text[slot], 0, 0);
     lv_obj_set_style_text_align(s_row_text[slot], LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_color(s_row_text[slot], lv_color_hex(UI_PAPER), 0);
+    lv_obj_set_style_text_color(s_row_text[slot], lv_color_hex(FEISHU_TEXT), 0);
     lv_label_set_long_mode(s_row_text[slot],LV_LABEL_LONG_CLIP);
     set_label_text(s_row_text[slot], "发消息");
     set_label_text(s_row_mark[slot], "");
     lv_obj_set_style_bg_opa(s_row_mark[slot], LV_OPA_TRANSP, 0);
+}
+
+static bool pairing_console_qr(bool visible)
+{
+    if(!visible) {
+        if(s_pair_qr)lv_obj_delete(s_pair_qr);
+        if(s_pair_caption)lv_obj_delete(s_pair_caption);
+        s_pair_qr=s_pair_caption=NULL;return true;
+    }
+    if(s_pair_qr)return true;
+    s_pair_qr=lv_image_create(s_scr);
+    if(!s_pair_qr)return false;
+    lv_image_set_src(s_pair_qr,&feishu_xiao_console_qr);
+    lv_obj_set_size(s_pair_qr,feishu_xiao_console_qr.header.w,feishu_xiao_console_qr.header.h);
+    lv_obj_set_pos(s_pair_qr,46,86);
+    lv_obj_set_style_pad_all(s_pair_qr,0,0);
+    lv_obj_set_style_border_width(s_pair_qr,0,0);lv_obj_set_style_radius(s_pair_qr,8,0);
+    s_pair_caption=lv_label_create(s_scr);
+    if(!s_pair_caption){lv_obj_delete(s_pair_qr);s_pair_qr=NULL;return false;}
+    lv_obj_set_style_text_font(s_pair_caption,&lv_font_ai_passport_14,0);
+    lv_obj_set_style_text_color(s_pair_caption,lv_color_hex(FEISHU_MUTED),0);
+    lv_label_set_text(s_pair_caption,"扫码打开小智控制台");
+    lv_obj_align_to(s_pair_caption,s_pair_qr,LV_ALIGN_OUT_BOTTOM_MID,0,12);
+    return true;
 }
 
 static void render(lv_timer_t *timer)
@@ -1807,7 +2217,7 @@ static void render(lv_timer_t *timer)
     (void)timer;
     char body[1200] = { 0 };
     char hint[96] = { 0 };
-    bool detail_view=false;
+    bool detail_view=false,request_pairing=false;
     uint32_t detail_page=0;int64_t detail_id=0;int32_t detail_scroll=0;
     xSemaphoreTake(s_state_lock, portMAX_DELAY);
     uint32_t recovered=feishu_cache_recovery_generation();
@@ -1832,12 +2242,27 @@ static void render(lv_timer_t *timer)
     static uint64_t painted;
     static uint32_t painted_generation;
     static bool paint_valid;
+    if(s_state.nav.page==FEISHU_PAGE_XIAOZHI && s_state.pairing.code[0] && s_state.pairing.expires_at_ms &&
+       (int32_t)((uint32_t)(esp_timer_get_time()/1000)-s_state.pairing.expires_at_ms)>=0)s_state.pairing.code[0]=0;
+    uint32_t pairing_now=(uint32_t)(esp_timer_get_time()/1000);
+    if(feishu_pairing_auto_due(pairing_now,s_state.ready && !s_state.loading && !s_state.closing && s_state.nav.page==FEISHU_PAGE_XIAOZHI &&
+        !s_state.cancel_pairing && !s_state.pairing_auto_blocked,s_state.pairing_busy,s_state.pairing.paired,
+        s_state.pairing.code[0]!=0,s_state.pairing.expires_at_ms,s_state.pairing_retry_at)) {
+        s_state.pairing_busy=true;s_state.status_error=false;++s_state.pairing_request;
+        feishu_utf8_copy(s_state.status,sizeof(s_state.status),"正在获取最新设备码…");request_pairing=true;
+    }
     bool stable=s_state.nav.page!=FEISHU_PAGE_RECORDING &&
         s_state.nav.page!=FEISHU_PAGE_TRANSCRIBING && !s_state.sending && !s_state.record_pending;
     uint64_t signature=UINT64_C(14695981039346656037);
     if(stable) {
         const unsigned char *bytes=(const unsigned char *)&s_state;
         for(size_t i=0;i<sizeof(s_state);++i)signature=(signature^bytes[i])*UINT64_C(1099511628211);
+        /* Network/editor state is page-owned rather than part of s_state.
+         * Cursor and password edits must also invalidate the paint signature. */
+        if(s_network_ui && network_page(s_state.nav.page)) {
+            bytes=(const unsigned char *)s_network_ui;
+            for(size_t i=0;i<sizeof(*s_network_ui);++i)signature=(signature^bytes[i])*UINT64_C(1099511628211);
+        }
         if(paint_valid && painted_generation==s_screen_generation && painted==signature) {
             xSemaphoreGive(s_state_lock);return;
         }
@@ -1849,12 +2274,12 @@ static void render(lv_timer_t *timer)
     if (!s_state.ready) {
         show_list_rows(false);
         set_label_text(s_title, "飞书");
-        snprintf(body, sizeof(body), "\n\n%s", s_state.status);
+        snprintf(body, sizeof(body), "%s", s_state.status);
         snprintf(hint, sizeof(hint), "%s", s_state.loading ? "请稍候" : "长按确定：返回");
     } else if (s_state.loading) {
         show_list_rows(false);
         set_label_text(s_title, "飞书");
-        snprintf(body, sizeof(body), "\n\n%s", s_state.status);
+        snprintf(body, sizeof(body), "%s", s_state.status);
         snprintf(hint, sizeof(hint), "请稍候");
     } else {
         switch (s_state.nav.page) {
@@ -1888,11 +2313,12 @@ static void render(lv_timer_t *timer)
                 const feishu_message_t *message =
                     &s_state.messages[s_state.nav.message_index];
                 char sender[49];
-                char detail[401];
+                char detail[FEISHU_TEXT_PAGE_CAP];
                 feishu_utf8_copy(sender, sizeof(sender),
                     message->mine ? "我" : message->sender_name);
                 feishu_utf8_copy(detail,sizeof(detail),s_state.detail_loaded ? s_state.detail_text : message->text);
-                snprintf(body, sizeof(body), "\n%s\n\n%s", sender, detail);
+                lv_label_set_text_fmt(s_title,"%s | 消息",sender);
+                snprintf(body,sizeof(body),"%s",detail);
                 if(message->type==FEISHU_MESSAGE_TEXT && message->text_truncated && !s_state.detail_loaded)
                     snprintf(hint,sizeof(hint),"仅显示预览  确定重试\n长按确定返回");
                 else if(message->type==FEISHU_MESSAGE_TEXT && s_state.detail_pages>1)
@@ -1955,53 +2381,34 @@ static void render(lv_timer_t *timer)
                     1u<<(unsigned)s_state.image.info.zoom,s_state.image_horizontal ? "上左 下右":"上移 下移");
                 else snprintf(hint,sizeof(hint),"完整预览 长按上键放大\n确定操作 长按确定返回");
             } else {
-                snprintf(body, sizeof(body), "\n\n%s", s_state.status);
+                snprintf(body, sizeof(body), "%s", s_state.status);
                 snprintf(hint,sizeof(hint),"确定操作  长按返回");
             }
             break;
         case FEISHU_PAGE_IMAGE_ACTIONS: {
-            show_list_rows(false);set_label_text(s_title,"图片操作");
+            set_label_text(s_title,"图片操作");
             static const char *labels[]={"回复此图","放大","缩小","切换移动方向","重试预览","返回图片"};
-            append_line(body,sizeof(body),"图片操作\n\n");
-            for(size_t i=0;i<6;++i)append_line(body,sizeof(body),"%s %s\n",s_state.nav.settings_index==i ? ">":" ",labels[i]);
-            snprintf(hint,sizeof(hint),"上下选择  确定  长按返回");
-            break;
+            render_choice_rows(labels,6,s_state.nav.settings_index,false);
+            snprintf(hint,sizeof(hint),"上下选择  确定  长按返回");break;
         }
         case FEISHU_PAGE_RECORDING:
             show_list_rows(false);
-            set_label_text(s_title,
-                s_state.nav.reply_to_message ? "回复消息" : "发送消息");
-            if (s_state.nav.reply_to_message &&
-                s_state.nav.message_index < s_state.nav.message_count) {
-            char target[121];
-            feishu_utf8_copy(target, sizeof(target),
-                             s_state.messages[s_state.nav.message_index].text);
-              snprintf(body, sizeof(body), "\n%s\n\n回复：%s\n\n%u.%u 秒\n\n%s",
-                       s_state.record_pending ? "正在准备录音":"正在录音",target,
-                       s_state.elapsed_ms / 1000, (s_state.elapsed_ms % 1000) / 100,
-                       s_state.record_pending ? "请稍候":"请说话...");
-            } else {
-                  snprintf(body, sizeof(body), "\n%s\n\n%u.%u 秒\n\n%s",
-                           s_state.record_pending ? "正在准备录音":"正在录音",
-                         s_state.elapsed_ms / 1000,
-                           (s_state.elapsed_ms % 1000) / 100,s_state.record_pending ? "请稍候":"请说话...");
-            }
-            snprintf(hint, sizeof(hint), "确定停止  长按取消");
+            set_label_text(s_title,s_state.record_pending ? "准备录音":"语音输入 | 录音中");
+            if(s_state.record_pending)snprintf(body,sizeof(body),"正在准备麦克风…");
+            else snprintf(body,sizeof(body),"正在聆听  %u.%u秒",
+                s_state.elapsed_ms/1000,(s_state.elapsed_ms%1000)/100);
+            snprintf(hint,sizeof(hint),"确定结束录音  长按取消");
             break;
         case FEISHU_PAGE_TRANSCRIBING:
-            show_list_rows(false);
-            snprintf(body, sizeof(body), "\n\n正在识别语音...\n\n请稍候");
-            snprintf(hint, sizeof(hint), "长按取消");
+            show_list_rows(false);set_label_text(s_title,"正在识别语音");
+            snprintf(body,sizeof(body),"正在整理识别文字\n\n完成后请先检查正文");
+            snprintf(hint,sizeof(hint),"长按取消");
             break;
         case FEISHU_PAGE_REVIEW:
             show_list_rows(false);
             set_label_text(s_title,s_state.pending_slot==RAM_REPLY_SLOT ? "确认消息":"审阅草稿");
-            char destination[96]={0};
-            if(s_state.nav.draft_manager)snprintf(destination,sizeof(destination),"目标：%s\n",s_state.pending.chat);
-            snprintf(body, sizeof(body), "%s%s\n\n%s%s%s",destination,
-                     s_state.nav.reply_to_message ? "确认回复" : "确认发送",
-                     s_state.status[0] ? s_state.status : "",
-                       s_state.status[0] ? "\n\n" : "",s_state.detail_loaded ? s_state.detail_text:s_state.reply);
+            set_label_text(s_title,s_state.nav.reply_to_message ? "确认回复 | 识别文字":"确认发送 | 识别文字");
+            snprintf(body,sizeof(body),"%s",s_state.detail_loaded ? s_state.detail_text:s_state.reply);
             if(s_state.detail_pages>1)snprintf(hint,sizeof(hint),"%lu/%lu页  上下翻页\n确定操作  长按确定保留返回",
                 (unsigned long)s_state.detail_page+1,(unsigned long)s_state.detail_pages);
             else if(s_state.pending_slot==RAM_REPLY_SLOT)snprintf(hint,sizeof(hint),
@@ -2010,57 +2417,62 @@ static void render(lv_timer_t *timer)
             detail_view=true;detail_page=s_state.detail_page;detail_id=s_state.pending.object_id;
             detail_scroll=s_state.detail_scroll;
             break;
-        case FEISHU_PAGE_DRAFT_ACTIONS:
-            show_list_rows(false);
+        case FEISHU_PAGE_DRAFT_ACTIONS: {
             set_label_text(s_title,"草稿操作");
-            snprintf(body,sizeof(body),"确认处理草稿\n\n%s%s%s  %s\n\n%s  重录\n\n%s  取消草稿",
-                s_state.pending_retry_warning ? "上次结果未确认，重试可能重复\n请先查看飞书\n\n":"",
-                s_state.pending.offset ? "已发送部分内容，保留剩余进度\n\n":"",
-                s_state.nav.settings_index==0 ? ">":" ",s_state.pending_retry_warning ? "仍要重试":"发送全文（必要时分段）",
-                s_state.nav.settings_index==1 ? ">":" ",s_state.nav.settings_index==2 ? ">":" ");
-            snprintf(hint,sizeof(hint),"上下选择  确定  长按返回审阅");
-            break;
+            const char *labels[]={s_state.pending_retry_warning ? "仍要重试（可能重复）":"发送全文（必要时分段）","重录","取消草稿"};
+            render_choice_rows(labels,3,s_state.nav.settings_index,false);
+            snprintf(hint,sizeof(hint),"上下选择  确定  长按返回审阅");break;
+        }
         case FEISHU_PAGE_STATUS:
             show_list_rows(false);
-            snprintf(body, sizeof(body), "\n\n%s", s_state.status);
+            snprintf(body, sizeof(body), "%s", s_state.status);
             snprintf(hint, sizeof(hint), "长按确定：返回消息");
             break;
         case FEISHU_PAGE_DRAFTS:
-            show_list_rows(false);set_label_text(s_title,"全部待发送草稿");
-            if(s_state.recovery_generation)append_line(body,sizeof(body),"故障数据已保留\n旧草稿需恢复后查看\n\n");
-            if(!s_state.nav.draft_count)append_line(body,sizeof(body),"\n没有待发送草稿\n");
-            size_t draft_start=s_state.nav.draft_index>1 ? s_state.nav.draft_index-1:0;
-            if(s_state.nav.draft_count)append_line(body,sizeof(body),"%u/%u\n\n",
-                (unsigned)s_state.nav.draft_index+1,(unsigned)s_state.nav.draft_count);
-            for(size_t i=draft_start;i<s_state.nav.draft_count && i<draft_start+2;++i)append_line(body,sizeof(body),"%s %s\n\n",
-                i==s_state.nav.draft_index ? ">":" ",s_state.draft_labels[i]);
-            if(s_state.status[0])append_line(body,sizeof(body),"%s",s_state.status);
-            snprintf(hint,sizeof(hint),"上下选择 确定审阅\n长按确定返回会话");
-            break;
-        case FEISHU_PAGE_SETTINGS:
-            show_list_rows(false);
-            append_line(body, sizeof(body), "设置\n\n");
-            if(s_state.recovery_generation)append_line(body,sizeof(body),"故障数据已保留，旧草稿待恢复\n\n");
-            append_line(body, sizeof(body), "%s 重新配置 Wi-Fi\n\n",
-                        s_state.nav.settings_index == 0 ? ">" : " ");
-            append_line(body, sizeof(body), "%s 更换应用/账号\n\n",
-                        s_state.nav.settings_index == 1 ? ">" : " ");
-            append_line(body, sizeof(body), "%s 全部待发送草稿\n\n",
-                        s_state.nav.settings_index == 2 ? ">" : " ");
-            append_line(body, sizeof(body), "%s 重新授权当前应用\n\n",
-                        s_state.nav.settings_index == 3 ? ">" : " ");
-            append_line(body,sizeof(body),"%s 返回会话\n",s_state.nav.settings_index==4 ? ">":" ");
-            snprintf(hint, sizeof(hint), "上下选择  确定  长按返回");
-            break;
+            set_label_text(s_title,"草稿管理");
+            if(s_state.nav.draft_count) {
+                const char *labels[FEISHU_OUTBOX_SLOTS];
+                for(size_t i=0;i<FEISHU_OUTBOX_SLOTS;++i)labels[i]=s_state.draft_labels[i];
+                render_choice_rows(labels,s_state.nav.draft_count>FEISHU_OUTBOX_SLOTS ? FEISHU_OUTBOX_SLOTS:s_state.nav.draft_count,s_state.nav.draft_index,true);
+            } else {show_list_rows(false);snprintf(body,sizeof(body),"没有待发送草稿");}
+            snprintf(hint,sizeof(hint),"上下选择  确定审阅  长按返回");break;
+        case FEISHU_PAGE_NETWORK:
+        case FEISHU_PAGE_NETWORK_SCAN:
+        case FEISHU_PAGE_NETWORK_PASSWORD:
+        case FEISHU_PAGE_NETWORK_ACTIONS:
+            network_render(body,sizeof(body),hint,sizeof(hint));break;
+        case FEISHU_PAGE_SETTINGS: {
+            set_label_text(s_title,"设置");
+            static const char *names[FEISHU_SETTING_COUNT]={
+                [FEISHU_SETTING_ACCOUNT]="飞书账号",[FEISHU_SETTING_XIAOZHI]="小智设置",
+                [FEISHU_SETTING_NETWORK]="网络连接",[FEISHU_SETTING_DRAFTS]="草稿管理",[FEISHU_SETTING_RETURN]="返回会话"};
+            render_choice_rows(names,FEISHU_SETTING_COUNT,s_state.nav.settings_index,false);
+            snprintf(hint,sizeof(hint),"上下选择  确定打开  长按返回");break;
+        }
         case FEISHU_PAGE_CONFIRM:
             show_list_rows(false);
-            snprintf(body, sizeof(body), "\n确认操作\n\n%s\n\n此操作完成后设备会重启",
+            set_label_text(s_title,"确认操作");
+            snprintf(body, sizeof(body), "%s\n\n此操作完成后设备会重启",
                      s_state.nav.confirm_action == 1 ?
                      "重新配置 Wi-Fi？\n飞书绑定会保留" :
-                     s_state.nav.confirm_action==2 ? "更换应用或账号？\n完成前保留原绑定及草稿" :
-                     "重新授权当前应用？\n应用和 Wi-Fi 会保留");
+                     s_state.nav.confirm_action==2 ? "更换BOT或账号？\n完成前保留原绑定及草稿" :
+                     "重新授权当前BOT？\nBOT和 Wi-Fi 会保留");
             snprintf(hint, sizeof(hint), "确定继续  上/下取消");
             break;
+        case FEISHU_PAGE_XIAOZHI: {
+            show_list_rows(false);set_label_text(s_title,"小智设置");
+            bool expired=s_state.pairing.expires_at_ms && (int32_t)((uint32_t)(esp_timer_get_time()/1000)-s_state.pairing.expires_at_ms)>=0;
+            if(s_state.pairing.paired)snprintf(body,sizeof(body),"设备 ID\n%s",s_state.pairing.device_id);
+            else if(s_state.pairing.code[0] && !expired)snprintf(body,sizeof(body),"设备配对码\n%s",s_state.pairing.code);
+            else snprintf(body,sizeof(body),"小智配置后台");
+            snprintf(hint,sizeof(hint),"确定刷新  长按返回");break;
+        }
+        case FEISHU_PAGE_ACCOUNT: {
+            set_label_text(s_title,"飞书账号");
+            static const char *labels[]={"BOT授权","选择或新建BOT","返回设置"};
+            render_choice_rows(labels,3,s_state.nav.settings_index,false);
+            snprintf(hint,sizeof(hint),"上下选择  确定  长按返回");break;
+        }
         default:
             break;
         }
@@ -2069,7 +2481,7 @@ static void render(lv_timer_t *timer)
     feishu_utf8_copy(footer_notice,sizeof(footer_notice),s_state.status);
     bool notice_error=s_state.status_error;
     if(!footer_notice[0])feishu_utf8_copy(footer_notice,sizeof(footer_notice),
-        s_state.nav.page==FEISHU_PAGE_MESSAGES ? "消息已加载":s_state.nav.page==FEISHU_PAGE_CHATS ? "会话已加载":"就绪");
+        s_state.nav.page==FEISHU_PAGE_MESSAGES ? "双击上回消息，下到发送":s_state.nav.page==FEISHU_PAGE_CHATS ? "会话已加载":"");
     switch(s_state.nav.page) {
     case FEISHU_PAGE_CHATS:
         if(s_state.chat_page_more)snprintf(footer_hint,sizeof(footer_hint),"%lu/?页  长按上下翻页  长按确定设置",(unsigned long)s_state.chat_page_number+1);
@@ -2083,18 +2495,45 @@ static void render(lv_timer_t *timer)
         snprintf(footer_hint,sizeof(footer_hint),"%lu/%lu页  长按上下翻页  长按确定返回",(unsigned long)s_state.detail_page+1,(unsigned long)s_state.detail_pages);break;
     case FEISHU_PAGE_REPLY_READY:snprintf(footer_hint,sizeof(footer_hint),"确定开始录音 / 长按返回");break;
     case FEISHU_PAGE_RECORDING:snprintf(footer_hint,sizeof(footer_hint),"确定结束录音 / 长按取消");break;
+    case FEISHU_PAGE_SETTINGS:snprintf(footer_hint,sizeof(footer_hint),"上下选择  确定打开  长按返回");break;
+    case FEISHU_PAGE_DRAFTS:snprintf(footer_hint,sizeof(footer_hint),"%u/%u 上下选择  确定审阅  长按返回",s_state.nav.draft_count ? (unsigned)s_state.nav.draft_index+1:0,(unsigned)s_state.nav.draft_count);break;
+    case FEISHU_PAGE_DRAFT_ACTIONS:case FEISHU_PAGE_IMAGE_ACTIONS:case FEISHU_PAGE_ACCOUNT:
+        snprintf(footer_hint,sizeof(footer_hint),"上下选择  确定  长按返回");break;
+    case FEISHU_PAGE_CONFIRM:snprintf(footer_hint,sizeof(footer_hint),"确定继续  上下取消");break;
+    case FEISHU_PAGE_IMAGE:snprintf(footer_hint,sizeof(footer_hint),
+        s_state.image_ready ? "确定操作  长按上下缩放  长按返回":"确定操作  长按返回");break;
+    case FEISHU_PAGE_XIAOZHI:snprintf(footer_hint,sizeof(footer_hint),"确定刷新  长按返回");break;
+    case FEISHU_PAGE_NETWORK:
+    case FEISHU_PAGE_NETWORK_SCAN:
+    case FEISHU_PAGE_NETWORK_ACTIONS:
+        snprintf(footer_hint,sizeof(footer_hint),"上下选择  确定打开  长按返回");break;
+    case FEISHU_PAGE_NETWORK_PASSWORD:
+        snprintf(footer_hint,sizeof(footer_hint),"上下选键  确定输入  长按返回");break;
     default:feishu_text_preview(footer_hint,sizeof(footer_hint),hint,false,32,1);break;
     }
-    if(s_state.nav.page==FEISHU_PAGE_RECORDING && !s_state.status[0])feishu_utf8_copy(footer_notice,sizeof(footer_notice),"录音中");
-    char battery[8];
-    if (s_state.battery_percent >= 0) {
-        unsigned percent = (unsigned)(s_state.battery_percent > 100 ?
-                                      100 : s_state.battery_percent);
-        snprintf(battery, sizeof(battery), "%u%%", percent);
-    } else {
-        snprintf(battery, sizeof(battery), "--%%");
+    if(!s_state.status[0] && s_state.nav.page==FEISHU_PAGE_REVIEW)
+        feishu_utf8_copy(footer_notice,sizeof(footer_notice),"上方是待发送正文，请确认");
+    if(s_state.nav.page==FEISHU_PAGE_RECORDING && !s_state.status[0])feishu_utf8_copy(footer_notice,sizeof(footer_notice),
+        s_state.record_pending ? "正在准备麦克风，请稍候":"正在录音，请说话");
+    if(s_state.nav.page==FEISHU_PAGE_XIAOZHI && !s_state.pairing_busy && !s_state.pairing.paired &&
+       (!s_state.pairing.code[0] || (s_state.pairing.expires_at_ms && (int32_t)((uint32_t)(esp_timer_get_time()/1000)-s_state.pairing.expires_at_ms)>=0))) {
+        if(!notice_error || !footer_notice[0])feishu_utf8_copy(footer_notice,sizeof(footer_notice),
+            s_state.pairing.expires_at_ms && (int32_t)((uint32_t)(esp_timer_get_time()/1000)-s_state.pairing.expires_at_ms)>=0 ? "配对码已过期":"尚未获取设备码");
+        notice_error=true;
     }
-    set_label_text(s_page_info, battery);
+    if(s_state.nav.page==FEISHU_PAGE_ACCOUNT && !s_state.loading)feishu_utf8_copy(footer_notice,sizeof(footer_notice),
+        s_state.nav.settings_index==1 ? "选择BOT后继续授权":"授权BOT访问你的飞书数据");
+    if(s_state.nav.page==FEISHU_PAGE_DRAFT_ACTIONS && s_state.pending_retry_warning) {
+        feishu_utf8_copy(footer_notice,sizeof(footer_notice),"结果未确认，重试可能重复");notice_error=true;
+    } else if(s_state.nav.page==FEISHU_PAGE_DRAFT_ACTIONS && s_state.pending.offset && !footer_notice[0])
+        feishu_utf8_copy(footer_notice,sizeof(footer_notice),"将继续发送剩余内容");
+    if(s_state.nav.page==FEISHU_PAGE_DRAFTS && s_state.recovery_generation) {
+        feishu_utf8_copy(footer_notice,sizeof(footer_notice),"旧草稿隔离保留，恢复后查看");notice_error=true;
+    }
+    bool show_pairing=s_state.nav.page==FEISHU_PAGE_XIAOZHI;
+    lv_obj_set_style_text_align(s_content,show_pairing ? LV_TEXT_ALIGN_CENTER:LV_TEXT_ALIGN_LEFT,0);
+    if(!pairing_console_qr(show_pairing) && show_pairing)append_line(body,sizeof(body),"\n\n%s",FEISHU_XIAO_CONSOLE_URL);
+    feishu_ui_battery(s_page_info,s_state.battery_percent);
     xSemaphoreGive(s_state_lock);
     if (!lv_obj_has_flag(s_content, LV_OBJ_FLAG_HIDDEN)) {
         set_label_text(s_content, body);
@@ -2120,8 +2559,10 @@ static void render(lv_timer_t *timer)
     char notice_line[96];
     feishu_text_preview(notice_line,sizeof(notice_line),footer_notice,false,32,1);
     set_label_text(s_notice,notice_line);
-    lv_obj_set_style_text_color(s_notice,lv_color_hex(notice_error ? 0xFF9B91:0xE1EDF4),0);
-    set_label_text(s_hint,footer_hint);
+    lv_obj_set_style_text_color(s_notice,lv_color_hex(notice_error ? FEISHU_ERROR:FEISHU_MUTED),0);
+    lv_obj_t *groups[]={s_hint,s_hint_groups[0],s_hint_groups[1]};
+    feishu_ui_actions(groups,footer_hint);
+    if(request_pairing)enqueue(WORK_CHECK_XIAOZHI);
 }
 
 static void enqueue(work_command_t command)
@@ -2140,6 +2581,10 @@ static void enqueue(work_command_t command)
         xSemaphoreTake(s_state_lock,portMAX_DELAY);
         s_state.loading=false;
         if(command==WORK_SEND)s_state.sending=false;
+        if(command==WORK_CHECK_XIAOZHI) {
+            s_state.pairing_busy=false;s_state.status_error=true;
+            s_state.pairing_retry_at=(uint32_t)(esp_timer_get_time()/1000)+30000;
+        }
         if(command==WORK_RECORD) {
             s_state.record_pending=false;s_state.stop_recording=s_state.cancel_recording=true;
             s_state.nav.page=s_state.record_replaces_pending && s_state.pending_slot>=0 ? FEISHU_PAGE_REVIEW:FEISHU_PAGE_REPLY_READY;
@@ -2219,6 +2664,7 @@ static bool change_image(int direction,int zoom,bool axis,bool retry)
 
 static void handle_navigation(feishu_nav_event_t event)
 {
+    if(network_navigation(event))return;
     if((event==FEISHU_NAV_UP || event==FEISHU_NAV_DOWN) && move_detail(event==FEISHU_NAV_UP ? -1 : 1,false))return;
     if((event==FEISHU_NAV_UP || event==FEISHU_NAV_DOWN) && change_image(event==FEISHU_NAV_UP ? -1:1,0,false,false))return;
     feishu_nav_action_t action;bool schedule_image=false;
@@ -2234,6 +2680,18 @@ static void handle_navigation(feishu_nav_event_t event)
         return;
     }
     previous_page = s_state.nav.page;
+    if(previous_page==FEISHU_PAGE_XIAOZHI) {
+        bool check=event==FEISHU_NAV_OK && !s_state.pairing_busy;
+        if(event==FEISHU_NAV_BACK) {
+            s_state.cancel_pairing=true;++s_state.pairing_request;s_state.pairing_busy=false;
+            s_state.nav.page=s_state.pairing_return_page;s_state.status[0]=0;s_state.status_error=false;
+        } else if(check) {
+            s_state.cancel_pairing=false;s_state.pairing_busy=true;++s_state.pairing_request;
+            s_state.status_error=false;
+            feishu_utf8_copy(s_state.status,sizeof(s_state.status),"正在检查配对状态…");
+        }
+        xSemaphoreGive(s_state_lock);if(check)enqueue(WORK_CHECK_XIAOZHI);sync_audio_focus();return;
+    }
     s_state.status_error=false;
     if(previous_page==FEISHU_PAGE_REVIEW && event==FEISHU_NAV_BACK) {
         bool manager=s_state.nav.draft_manager;
@@ -2243,7 +2701,7 @@ static void handle_navigation(feishu_nav_event_t event)
             s_state.reply[0]=s_state.reply_uuid[0]=s_state.detail_text[0]=0;
             feishu_utf8_copy(s_state.status,sizeof(s_state.status),"已取消内存中的待发消息");
         } else feishu_utf8_copy(s_state.status,sizeof(s_state.status),"草稿已保留，进入回复可继续");
-        xSemaphoreGive(s_state_lock);if(manager)enqueue(WORK_LIST_DRAFTS);return;
+        xSemaphoreGive(s_state_lock);if(manager)enqueue(WORK_LIST_DRAFTS);sync_audio_focus();return;
     }
     if(previous_page==FEISHU_PAGE_REVIEW && (s_state.detail_pages>1 ||
        (s_state.pending_slot==RAM_REPLY_SLOT && s_state.detail_scroll_max>0)) && event==FEISHU_NAV_OK) {
@@ -2307,6 +2765,10 @@ static void handle_navigation(feishu_nav_event_t event)
     if(action==FEISHU_NAV_LIST_DRAFTS || action==FEISHU_NAV_OPEN_DRAFT) {
         s_state.loading=true;feishu_utf8_copy(s_state.status,sizeof(s_state.status),"正在读取草稿...");
     }
+    if(action==FEISHU_NAV_CHECK_XIAOZHI) {
+        s_state.pairing_return_page=previous_page;s_state.pairing_busy=true;s_state.cancel_pairing=false;s_state.pairing_auto_blocked=false;s_state.pairing_retry_at=0;++s_state.pairing_request;
+        feishu_utf8_copy(s_state.status,sizeof(s_state.status),"正在读取小智配置…");
+    }
     if(read_pending) {
         s_state.nav.draft_manager=false;
         /* Ordinary recording must not wait for a disposable database. Existing
@@ -2340,6 +2802,10 @@ static void handle_navigation(feishu_nav_event_t event)
         feishu_utf8_copy(s_state.status, sizeof(s_state.status), "正在加载消息...");
     } else if (action == FEISHU_NAV_START_RECORDING ||
                action == FEISHU_NAV_RETRY_RECORDING) {
+        if(action==FEISHU_NAV_START_RECORDING) {
+            s_state.nav.draft_manager=false;s_state.pending_slot=-1;s_state.pending_retry_warning=false;
+            memset(&s_state.pending,0,sizeof(s_state.pending));
+        }
         s_state.stop_recording = false;
         s_state.cancel_recording = false;
         s_state.record_pending=true;s_state.record_replaces_pending=action==FEISHU_NAV_RETRY_RECORDING;
@@ -2368,8 +2834,11 @@ static void handle_navigation(feishu_nav_event_t event)
                          s_state.nav.reply_to_message ?
                          "正在发送回复..." : "正在发送消息...");
     }
+    if(action==FEISHU_NAV_REAUTHORIZE || action==FEISHU_NAV_UNBIND) {
+        s_state.loading=true;feishu_utf8_copy(s_state.status,sizeof(s_state.status),"正在打开飞书登录…");
+    }
     xSemaphoreGive(s_state_lock);
-    if(read_pending || read_detail || action==FEISHU_NAV_START_RECORDING || action==FEISHU_NAV_RETRY_RECORDING ||
+    if(action==FEISHU_NAV_LOAD_MESSAGES || read_pending || read_detail || action==FEISHU_NAV_START_RECORDING || action==FEISHU_NAV_RETRY_RECORDING ||
        action==FEISHU_NAV_LOAD_IMAGE || leaving_image)
         feishu_api_cancel_prefetch();
     if(read_detail)enqueue(WORK_LOAD_TEXT_PAGE);
@@ -2384,11 +2853,17 @@ static void handle_navigation(feishu_nav_event_t event)
         change_image(0,action==FEISHU_NAV_IMAGE_ZOOM_IN ? 1:action==FEISHU_NAV_IMAGE_ZOOM_OUT ? -1:0,action==FEISHU_NAV_IMAGE_AXIS,false);
     if (action == FEISHU_NAV_START_RECORDING || action == FEISHU_NAV_RETRY_RECORDING) enqueue(WORK_RECORD);
     if (action == FEISHU_NAV_SEND_REPLY) enqueue(WORK_SEND);
+    if(action==FEISHU_NAV_LIST_NETWORK)network_enter();
     if (action == FEISHU_NAV_RESET_WIFI) enqueue(WORK_RESET_WIFI);
     if (action == FEISHU_NAV_UNBIND) enqueue(WORK_UNBIND);
     if (action == FEISHU_NAV_REAUTHORIZE) enqueue(WORK_REAUTHORIZE);
+    if (action == FEISHU_NAV_CHECK_XIAOZHI) enqueue(WORK_CHECK_XIAOZHI);
+    sync_audio_focus();
 }
 
+#ifdef FEISHU_UI_AUTOTEST
+#include "../tools/ui_probe/pairing_ui.inc"
+#endif
 void demo_feishu_enter(void)
 {
     ++s_screen_generation;
@@ -2396,6 +2871,8 @@ void demo_feishu_enter(void)
     s_state.pending_slot=-1;
     memset(&s_session, 0, sizeof(s_session));
     s_authenticated=false;
+    atomic_store(&s_audio_focus_queued,false);
+    s_focus_audio_reserved=false;
     s_displayed_image_version=UINT32_MAX;
     s_chat_pin=s_message_pin=s_text_pin=s_image_pin=0;
     s_cache_app[0]=s_cache_owner[0]='\0';
@@ -2411,33 +2888,15 @@ void demo_feishu_enter(void)
     feishu_cache_init();
 
     s_scr = lv_obj_create(NULL);
+    lv_obj_add_event_cb(s_scr,network_keyboard_draw,LV_EVENT_DRAW_POST,NULL);
     lv_obj_remove_flag(s_scr, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(s_scr, lv_color_hex(UI_INK), 0);
+    lv_obj_set_style_bg_color(s_scr, lv_color_hex(FEISHU_BG), 0);
+    lv_obj_set_style_bg_opa(s_scr,LV_OPA_COVER,0);
     lv_obj_set_style_border_width(s_scr, 0, 0);
     lv_obj_set_style_pad_all(s_scr, 0, 0);
-    s_title = lv_label_create(s_scr);
-    set_label_text(s_title, "飞书");
-    lv_obj_set_width(s_title, 168);
-    lv_label_set_long_mode(s_title, LV_LABEL_LONG_DOT);
-    lv_obj_set_style_text_font(s_title, &lv_font_ai_passport_14, 0);
-    lv_obj_set_style_text_color(s_title, lv_color_hex(UI_PAPER), 0);
-    lv_obj_align(s_title, LV_ALIGN_TOP_LEFT, 12, 10);
-    s_page_info = lv_label_create(s_scr);
-    lv_obj_set_width(s_page_info, 42);
-    lv_obj_set_style_text_font(s_page_info, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_align(s_page_info, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_set_style_text_color(s_page_info, lv_color_hex(UI_MUTED), 0);
-    lv_obj_align(s_page_info, LV_ALIGN_TOP_RIGHT, -10, 10);
-    s_header_rule = lv_obj_create(s_scr);
-    lv_obj_remove_flag(s_header_rule, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_pos(s_header_rule, 10, 34);
-    lv_obj_set_size(s_header_rule, 220, 1);
-    lv_obj_set_style_border_width(s_header_rule, 0, 0);
-    lv_obj_set_style_pad_all(s_header_rule, 0, 0);
-    lv_obj_set_style_bg_color(s_header_rule, lv_color_hex(0x54738C), 0);
-    lv_obj_set_style_bg_opa(s_header_rule, LV_OPA_COVER, 0);
+    feishu_ui_header(s_scr,&s_title,&s_page_info);
     s_viewport=lv_obj_create(s_scr);
-    lv_obj_set_size(s_viewport,216,FEISHU_CONTENT_HEIGHT);lv_obj_set_pos(s_viewport,12,38);
+    lv_obj_set_size(s_viewport,216,FEISHU_CONTENT_HEIGHT);lv_obj_set_pos(s_viewport,12,FEISHU_CONTENT_TOP);
     lv_obj_remove_flag(s_viewport,LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_remove_flag(s_viewport,LV_OBJ_FLAG_OVERFLOW_VISIBLE);
     lv_obj_set_style_bg_opa(s_viewport,LV_OPA_TRANSP,0);
@@ -2447,10 +2906,10 @@ void demo_feishu_enter(void)
     lv_obj_set_size(s_content,216,LV_SIZE_CONTENT);
     lv_obj_set_pos(s_content,0,0);
     lv_obj_set_style_text_font(s_content, &lv_font_ai_passport_14, 0);
-    lv_obj_set_style_text_color(s_content, lv_color_hex(UI_PAPER), 0);
+    lv_obj_set_style_text_color(s_content, lv_color_hex(FEISHU_TEXT), 0);
     lv_label_set_long_mode(s_content, LV_LABEL_LONG_WRAP);
     s_image = lv_image_create(s_scr);
-    lv_obj_set_pos(s_image, 12, 38);
+    lv_obj_set_pos(s_image, 12, 42);
     lv_obj_set_size(s_image, 216, 226);
     lv_image_set_inner_align(s_image,LV_IMAGE_ALIGN_CENTER);
     lv_obj_add_flag(s_image, LV_OBJ_FLAG_HIDDEN);
@@ -2472,7 +2931,7 @@ void demo_feishu_enter(void)
         lv_obj_set_style_text_font(s_row_avatar_text[i],
                                    &lv_font_ai_passport_14, 0);
         lv_obj_set_style_text_color(s_row_avatar_text[i],
-                                    lv_color_hex(UI_PAPER), 0);
+                                    lv_color_hex(FEISHU_TEXT), 0);
         lv_obj_center(s_row_avatar_text[i]);
         s_row_text[i] = lv_label_create(s_rows[i]);
         lv_obj_set_pos(s_row_text[i], 8, 5);
@@ -2489,31 +2948,14 @@ void demo_feishu_enter(void)
         lv_obj_set_size(s_row_mark[i], 9, 9);
         lv_obj_align(s_row_mark[i], LV_ALIGN_RIGHT_MID, -8, 0);
         lv_obj_set_style_radius(s_row_mark[i], LV_RADIUS_CIRCLE, 0);
-        lv_obj_set_style_bg_color(s_row_mark[i], lv_color_hex(UI_RED), 0);
+        lv_obj_set_style_bg_color(s_row_mark[i], lv_color_hex(FEISHU_ERROR), 0);
         lv_obj_set_style_bg_opa(s_row_mark[i], LV_OPA_TRANSP, 0);
         lv_obj_set_style_text_font(s_row_mark[i], &lv_font_ai_passport_14, 0);
         lv_obj_set_style_text_align(s_row_mark[i], LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_add_flag(s_rows[i], LV_OBJ_FLAG_HIDDEN);
     }
-    lv_obj_t *footer=lv_obj_create(s_scr);
-    lv_obj_set_pos(footer,10,272);lv_obj_set_size(footer,220,48);
-    lv_obj_remove_flag(footer,LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(footer,lv_color_hex(0x24445B),0);
-    lv_obj_set_style_bg_opa(footer,LV_OPA_TRANSP,0);
-    lv_obj_set_style_border_color(footer,lv_color_hex(0x54738C),0);
-    lv_obj_set_style_border_width(footer,1,0);
-    lv_obj_set_style_border_side(footer,LV_BORDER_SIDE_TOP,0);
-    lv_obj_set_style_radius(footer,0,0);lv_obj_set_style_pad_all(footer,0,0);
-    s_notice=lv_label_create(footer);s_hint=lv_label_create(footer);
-    lv_obj_t *labels[]={s_notice,s_hint};
-    for(unsigned i=0;i<2;++i) {
-        lv_obj_set_pos(labels[i],3,i ? 26:4);lv_obj_set_size(labels[i],212,18);
-        lv_obj_set_style_text_font(labels[i],&lv_font_ai_passport_14,0);
-        lv_obj_set_style_text_align(labels[i],LV_TEXT_ALIGN_CENTER,0);
-        lv_obj_set_style_text_color(labels[i],lv_color_hex(0xB9CFE0),0);
-        lv_label_set_long_mode(labels[i],LV_LABEL_LONG_CLIP);
-    }
-    lv_obj_set_style_text_letter_space(s_hint,-1,0);
+    lv_obj_t *actions[3];feishu_ui_footer(s_scr,&s_notice,actions);
+    s_hint=actions[0];s_hint_groups[0]=actions[1];s_hint_groups[1]=actions[2];
     lv_screen_load(s_scr);
 
     if (s_state_lock == NULL || s_worker_done == NULL || s_work_queue == NULL) {
@@ -2525,11 +2967,15 @@ void demo_feishu_enter(void)
     }
 
     s_timer = lv_timer_create(render, 100, NULL);
+#ifdef FEISHU_UI_AUTOTEST
+    s_ui_smoke_timer=lv_timer_create(pairing_ui_smoke,100,NULL);
+#endif
     // Message parsing and HTTPS each have non-trivial fixed stack peaks. Image
     // resource keys also enlarge the bounded message arrays kept on this task.
     // Message parsing needs more than the original 10 KiB stack, while a
     // 16 KiB stack leaves too little contiguous heap for Feishu's unusually
     // long OAuth Authorization header plus TLS buffers on an ESP32-C3.
+    feishu_asr_set_resource_hooks(reserve_audio_resources,release_audio_resources);
     if (xTaskCreate(worker_task, "feishu", 12288, NULL, 4, &s_worker) != pdPASS) {
         s_state.loading = false;
         feishu_utf8_copy(s_state.status, sizeof(s_state.status), "内存不足，请重启设备");
@@ -2540,12 +2986,16 @@ void demo_feishu_enter(void)
 
 void demo_feishu_exit(void)
 {
+#ifdef FEISHU_UI_AUTOTEST
+    if(s_ui_smoke_timer){lv_timer_delete(s_ui_smoke_timer);s_ui_smoke_timer=NULL;}
+#endif
     feishu_api_cancel_prefetch();
     if(s_state_lock) {
         xSemaphoreTake(s_state_lock,portMAX_DELAY);
         s_state.closing=true;
         s_state.stop_recording=true;
         s_state.cancel_recording=true;
+        s_state.cancel_pairing=true;++s_state.pairing_request;
         xSemaphoreGive(s_state_lock);
     }
     if (s_worker != NULL) {
@@ -2555,11 +3005,14 @@ void demo_feishu_exit(void)
         xSemaphoreTake(s_worker_done,portMAX_DELAY);
     }
     feishu_network_stop();
+    if(s_network_ui){memset(s_network_ui,0,sizeof(*s_network_ui));free(s_network_ui);s_network_ui=NULL;}
     if (s_timer != NULL) { lv_timer_delete(s_timer); s_timer = NULL; }
     if (s_scr != NULL) { lv_obj_delete(s_scr); s_scr = NULL; }
+    s_pair_qr=s_pair_caption=NULL;
     feishu_cache_unmount();
     if (s_work_queue != NULL) { vQueueDelete(s_work_queue); s_work_queue = NULL; }
     if (s_cache_queue != NULL) { vQueueDelete(s_cache_queue); s_cache_queue = NULL; }
+    feishu_asr_set_resource_hooks(NULL,NULL);
     if (s_cache_done != NULL) { vSemaphoreDelete(s_cache_done); s_cache_done = NULL; }
     if (s_worker_done != NULL) { vSemaphoreDelete(s_worker_done); s_worker_done = NULL; }
     if (s_state_lock != NULL) { vSemaphoreDelete(s_state_lock); s_state_lock = NULL; }
@@ -2568,6 +3021,9 @@ void demo_feishu_exit(void)
 
 void demo_feishu_key(bsp_btn_t btn, bsp_btn_ev_t ev)
 {
+    if(btn==BSP_BTN_UP && ev==BSP_BTN_DOUBLE) {handle_navigation(FEISHU_NAV_BROWSE);return;}
+    if(ev==BSP_BTN_LONG && (btn==BSP_BTN_UP || btn==BSP_BTN_DOWN) && network_long_key(btn))return;
+    if(btn==BSP_BTN_DOWN && ev==BSP_BTN_DOUBLE) {handle_navigation(FEISHU_NAV_COMPOSE);return;}
     if(ev==BSP_BTN_LONG && (btn==BSP_BTN_UP || btn==BSP_BTN_DOWN)) {
         if(change_image(0,btn==BSP_BTN_UP ? 1:-1,false,false))return;
         xSemaphoreTake(s_state_lock,portMAX_DELAY);
@@ -2635,7 +3091,7 @@ bool demo_feishu_back(void)
         consume = true;
     }
     xSemaphoreGive(s_state_lock);
-    if(cancel_read) {feishu_api_cancel_prefetch();return true;}
+    if(cancel_read) {feishu_api_cancel_prefetch();sync_audio_focus();return true;}
     if (consume && ready && !loading) {
         handle_navigation(FEISHU_NAV_BACK);
     }

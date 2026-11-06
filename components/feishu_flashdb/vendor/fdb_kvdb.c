@@ -316,6 +316,28 @@ static bool get_kv_from_cache(fdb_kvdb_t db, const char *name, size_t name_len, 
 }
 #endif /* FDB_KV_USING_CACHE */
 
+/* Advisory only: skipping prefetch never bypasses normal CRC/status checks. */
+bool _fdb_kv_cache_contains(fdb_kvdb_t db,const char *key)
+{
+#ifdef FDB_KV_USING_CACHE
+    uint32_t address;
+    return get_kv_from_cache(db,key,strlen(key),&address);
+#else
+    (void)db;(void)key;return false;
+#endif
+}
+
+/* A serialized iterator can retain a locator for subsequent key operations.
+ * It is only a hint: find_kv still checks CRC, status and the exact key. */
+void _fdb_kv_cache_hint(fdb_kvdb_t db,const char *key,uint32_t address)
+{
+#ifdef FDB_KV_USING_CACHE
+    update_kv_cache(db,key,strlen(key),address);
+#else
+    (void)db;(void)key;(void)address;
+#endif
+}
+
 /*
  * find the next KV address by magic word on the flash
  */

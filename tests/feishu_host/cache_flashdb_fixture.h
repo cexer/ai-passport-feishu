@@ -17,3 +17,5 @@ int xSemaphoreTakeRecursive(SemaphoreHandle_t handle,unsigned timeout)
 int xSemaphoreGiveRecursive(SemaphoreHandle_t handle)
 {assert(handle && lock_depth);--lock_depth;return 1;}
 void vTaskDelay(unsigned ticks) {(void)ticks;}
+
+void feishu_flash_port_close(void) {}

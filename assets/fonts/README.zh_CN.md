@@ -16,8 +16,8 @@
 
 ## 设备内置字库
 
-`main/lv_font_ai_passport_14.c` 由 Source Han Sans SC Normal 2.005 生成，
-采用 14 px、2-bit 灰度压缩字模，覆盖 ASCII、常用中文标点、全角字符以及完整的
+`main/lv_font_ai_passport_14.c` 由 Source Han Sans SC Medium 2.005 生成，
+采用 14 px、4-bit 灰度压缩字模，覆盖 ASCII、常用中文标点、全角字符以及完整的
 U+4E00-U+9FFF 中日韩统一表意文字区。源字库使用 SIL OFL 1.1 许可，许可全文
 保存在 `SourceHanSans-OFL.txt`。
 
@@ -28,8 +28,8 @@ U+4E00-U+9FFF 中日韩统一表意文字区。源字库使用 SIL OFL 1.1 许�
 17 px 与 4 px。
 
 可用 `tools/generate_feishu_font.py --converter <lv_font_conv.js> --font <2.005.otf>`
-复现。源 URL 与 SHA-256 固定在 `SourceHanSansSC-Normal-2.005.json`；托管的旧版
+复现。源 URL 与 SHA-256 固定在 `SourceHanSansSC-Medium-2.005.json`；托管的旧版
 LVGL 源字体缺少最后 16 个汉字，不能替代此输入。完整中文字模增大后，APP 起点不变，容量改为 `0x330000`；
 身份区与数据区地址不变。体积比较以实际 BIN/MAP 为准，不用生成 C 文件长度代替。
 
-完整 4 bpp 字形生成到 `feishu-14-4bpp.bin`（1,737,446 字节），从 0x500000 的只读 `feishu_font` 分区映射。生成的 C 保留字形指标与索引，启用 `CONFIG_LV_FONT_FMT_TXT_LARGE=y`。启动前校验资源 SHA-256，再打开中文界面。可用 `tools/generate_feishu_font.py --converter <lv_font_conv.js> --font <固定版本2.005.otf> --bpp 4` 复现；安装时须包含应用及匹配字形资源。现有固件、身份区及共享数据地址保持不变。
+完整 4 bpp 字形生成到 `feishu-14-4bpp.bin`（1,814,190 字节），从 0x500000 的只读 `feishu_font` 分区映射。生成的 C 保留字形指标与索引，启用 `CONFIG_LV_FONT_FMT_TXT_LARGE=y`。启动前校验资源 SHA-256，再打开中文界面。可用 `tools/generate_feishu_font.py --converter <lv_font_conv.js> --font <固定版本2.005.otf> --bpp 4` 复现；安装时须包含应用及匹配字形资源。现有固件、身份区及共享数据地址保持不变。

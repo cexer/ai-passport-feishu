@@ -75,7 +75,7 @@ static int matching(const char *key,unsigned state,entry_t **found)
     }
     return FEISHU_DATA_OK;
 }
-static int save_catalog(void)
+static int save_catalog_masked(const uint8_t omitted[16])
 {
     uint8_t *bytes=calloc(1,CATALOG_BYTES);
     if(!bytes)return FEISHU_DATA_NOMEM;
@@ -84,7 +84,7 @@ static int save_catalog(void)
         entry_t *e=&entries[i];uint8_t *p=bytes+32+i*RECORD_BYTES;
         /* In-flight chunks are recoverable garbage after reboot; only fully
          * published versions enter the durable catalog. */
-        if(e->state!=LIVE && e->state!=RETIRED)continue;
+        if((e->state!=LIVE && e->state!=RETIRED) || (omitted && (omitted[i/8]&(1u<<(i%8)))))continue;
         u64(p,e->id);u32(p+8,e->raw);u32(p+12,e->stored);u32(p+16,e->sequence);
         u32(p+20,e->hash);u32(p+24,e->touch);u32(p+28,e->key_tag);p[32]=e->state;p[33]=e->kind;p[34]=e->protected_data;u32(p+36,e->point_batches);u64(p+40,e->map);
     }
@@ -92,6 +92,7 @@ static int save_catalog(void)
     u32(bytes+24,feishu_block_crc32(bytes,24));
     int rc=mapped(feishu_fdb_put("@catalog",bytes,CATALOG_BYTES));free(bytes);return rc;
 }
+static int save_catalog(void) {return save_catalog_masked(NULL);}
 static int load_catalog(void)
 {
     uint8_t *bytes=malloc(CATALOG_BYTES);if(!bytes)return FEISHU_DATA_NOMEM;
@@ -312,6 +313,13 @@ int feishu_data_read(feishu_data_t *s,int64_t id,unsigned sequence,uint8_t *data
     CHECK_STORE(s);
     if(!valid(s) || id<=0 || !data || !size)return FEISHU_DATA_MISUSE;
     *size=0;entry_t *e=by_id(id);if(!e || sequence>=e->sequence)return FEISHU_DATA_NOTFOUND;
+    if(!sequence && e->sequence>=3) {
+        char prefix[24],first[40],last[40];
+        snprintf(prefix,sizeof(prefix),"b%016llx.",(unsigned long long)e->id);
+        block_name(first,e->id,0);block_name(last,e->id,e->sequence-1);
+        int prefetched=mapped(feishu_fdb_prefetch(prefix,first,last,e->sequence));
+        if(prefetched)return prefetched;
+    }
     char name[40];uint8_t packed[FEISHU_BLOCK_BYTES+12];size_t n=0;block_name(name,e->id,sequence);
     int rc=mapped(feishu_fdb_get(name,packed,sizeof(packed),&n));if(rc)return rc;
     if(n<=12 || memcmp(packed,"FBL1",4) || packed[11])return FEISHU_DATA_CORRUPT;
@@ -326,7 +334,6 @@ int feishu_data_pin(feishu_data_t *s,int64_t id,bool pin)
     entry_t *e=by_id(id);if(!e || (e->state!=LIVE && e->state!=RETIRED))return FEISHU_DATA_NOTFOUND;
     pins[e-entries]=pin;e->touch=++clock_value;return FEISHU_DATA_OK;
 }
-typedef struct {char key[64];size_t size;} garbage_t;
 static bool garbage(const char *key,size_t size,void *ctx)
 {
     unsigned long long id=0,map_id=0;unsigned seq=0;int consumed=0;entry_t *e=NULL;bool unused=false;
@@ -341,8 +348,7 @@ static bool garbage(const char *key,size_t size,void *ctx)
     } else if(sscanf(key,"v%16llx.%16llx%n",&id,&map_id,&consumed)==2 && !key[consumed]) {
         e=by_id((int64_t)id);unused=!e || e->map!=map_id;
     }
-    if(!unused)return false;
-    garbage_t *g=ctx;snprintf(g->key,sizeof(g->key),"%s",key);g->size=size;return true;
+    (void)size;(void)ctx;return unused;
 }
 static bool map_referenced(uint64_t id)
 {for(unsigned i=0;i<SLOTS;++i)if(entries[i].state && entries[i].map==id)return true;return false;}
@@ -350,19 +356,27 @@ static int reclaim(feishu_data_t *s,int kind,size_t *bytes)
 {
     CHECK_STORE(s);
     if(!valid(s) || !bytes)return FEISHU_DATA_MISUSE;
-    *bytes=0;garbage_t g={0};int rc=mapped(feishu_fdb_visit(garbage,&g));if(rc)return rc;
-    if(g.key[0]) {rc=mapped(feishu_fdb_delete(g.key));if(!rc)*bytes=g.size;return rc;}
-    entry_t *victim=NULL;
-    for(unsigned i=0;i<SLOTS;++i) {
-        entry_t *e=&entries[i];if(!e->state || e->state==STAGING || pins[i] ||
-           (e->state==LIVE && e->protected_data) || map_referenced(e->id) ||
-           (kind>=0 && e->kind!=kind && !(kind==FEISHU_DATA_METADATA && e->map)))continue;
-        if(!victim || (e->state==RETIRED && victim->state!=RETIRED) ||
-           (e->state==victim->state && e->touch<victim->touch))victim=e;
+    *bytes=0;int rc=mapped(feishu_fdb_collect_if(garbage,NULL,bytes));
+    if(rc || *bytes)return rc;
+    uint8_t omitted[16]={0};unsigned count=0;uint64_t selected=0;
+    /* Build an omission mask; RAM entries stay intact until the new catalog
+     * is durable. The existing catalog buffer is the only publication copy. */
+    while(count<16 && selected<4096) {
+        entry_t *victim=NULL;
+        for(unsigned i=0;i<SLOTS;++i) {
+            entry_t *e=&entries[i];if((omitted[i/8]&(1u<<(i%8))) || !e->state || e->state==STAGING || pins[i] ||
+               (e->state==LIVE && e->protected_data) || map_referenced(e->id) ||
+               (kind>=0 && e->kind!=kind && !(kind==FEISHU_DATA_METADATA && e->map)))continue;
+            if(!victim || (e->state==RETIRED && victim->state!=RETIRED) ||
+               (e->state==victim->state && e->touch<victim->touch))victim=e;
+        }
+        if(!victim)break;
+        unsigned index=(unsigned)(victim-entries);omitted[index/8]|=(uint8_t)(1u<<(index%8));
+        selected+=victim->stored;++count;
     }
-    if(!victim)return FEISHU_DATA_FULL;
-    entry_t before=*victim;memset(victim,0,sizeof(*victim));rc=save_catalog();
-    if(rc)*victim=before;
+    if(!count)return FEISHU_DATA_FULL;
+    rc=save_catalog_masked(omitted);
+    if(!rc)for(unsigned i=0;i<SLOTS;++i)if(omitted[i/8]&(1u<<(i%8)))memset(&entries[i],0,sizeof(entries[i]));
     return rc;
 }
 int feishu_data_reclaim(feishu_data_t *s,size_t *bytes) {return reclaim(s,-1,bytes);}

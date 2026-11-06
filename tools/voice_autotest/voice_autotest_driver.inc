@@ -63,7 +63,16 @@ static bool voice_probe_case(feishu_api_session_t *session,unsigned number,const
 }
 void feishu_asr_autotest(feishu_api_session_t *session)
 {
-#ifdef FEISHU_VOICE_AUTOTEST_PROVISION
+#ifdef FEISHU_ASR_XIAOZHI
+    volatile bool pair_cancel=true;feishu_asr_pairing_t pairing;
+    esp_err_t pair_cancelled=feishu_asr_pairing_check(&pairing,&pair_cancel);
+    pair_cancel=false;
+    esp_err_t pair_checked=feishu_asr_pairing_check(&pairing,&pair_cancel);
+    bool pair_pass=pair_cancelled==FEISHU_HTTP_ERR_CANCELLED && pair_checked==ESP_OK && pairing.supported && pairing.paired;
+    ESP_LOGI(TAG,"XIAO_PAIR_CHECK pass=%u cancel=%d result=%d paired=%u token_logged=0",(unsigned)pair_pass,pair_cancelled,pair_checked,(unsigned)pairing.paired);
+    if(!pair_pass){ESP_LOGI(TAG,"VOICE_PROBE_SUITE passed=0 total=9 sends=0");return;}
+#endif
+#if defined(FEISHU_VOICE_AUTOTEST_PROVISION) && !defined(FEISHU_ASR_XIAOZHI)
     if(!feishu_asr_autotest_provision()) {ESP_LOGI(TAG,"VOICE_PROBE_SUITE passed=0 total=9 sends=0");return;}
 #endif
     unsigned passed=0,total=0;
@@ -71,7 +80,12 @@ void feishu_asr_autotest(feishu_api_session_t *session)
     do {++total;if(voice_probe_case(session,total,pcm,sizeof(pcm),expected,ms,cancel,fail,delay,repeat,error))++passed;} while(0)
     PROBE(voice_fixture_one,voice_expected_one,4800,0,0,0,false,ESP_OK);
     PROBE(voice_fixture_two,voice_expected_two,5200,0,0,0,false,ESP_OK);
+#ifdef FEISHU_ASR_XIAOZHI
+    static const uint8_t silence[1920]={0};
+    ++total;if(voice_probe_case(session,total,silence,sizeof(silence),NULL,2040,0,0,0,true,ESP_ERR_NOT_FOUND))++passed;
+#else
     ++total;if(voice_probe_case(session,total,NULL,0,NULL,2000,0,0,0,false,ESP_OK))++passed;
+#endif
     PROBE(voice_fixture_one,NULL,4800,600,0,0,false,FEISHU_HTTP_ERR_CANCELLED);
     PROBE(voice_fixture_one,NULL,4800,0,400,0,false,ESP_FAIL);
     PROBE(voice_fixture_one,voice_expected_one,4800,0,0,1500,false,ESP_OK);
@@ -79,6 +93,19 @@ void feishu_asr_autotest(feishu_api_session_t *session)
     PROBE(voice_fixture_one,voice_expected_one,4800,0,0,0,false,ESP_OK);
     PROBE(voice_fixture_one,NULL,30000,0,0,0,true,ESP_OK);
 #undef PROBE
+#ifdef FEISHU_ASR_XIAOZHI
+    /* Focus warm-up discards samples; claim skips settling without a prefix loss. */
+    esp_err_t warm=feishu_asr_prepare(true);
+    for(unsigned i=0;i<300 && !feishu_asr_prepare_ready() && warm==ESP_OK;++i)vTaskDelay(pdMS_TO_TICKS(10));
+    bool ready=feishu_asr_prepare_ready();
+    bool warm_pass=ready && voice_probe_case(session,10,voice_fixture_one,sizeof(voice_fixture_one),voice_expected_one,4800,0,0,0,false,ESP_OK);
+    feishu_asr_prepare_cancel();(void)feishu_asr_prepare(false);
+    warm=feishu_asr_prepare(true);vTaskDelay(pdMS_TO_TICKS(200));
+    feishu_asr_prepare_cancel();(void)feishu_asr_prepare(false);
+    bool cancelled=warm==ESP_OK && !feishu_asr_prepare_ready();
+    bool recovered=voice_probe_case(session,11,voice_fixture_one,sizeof(voice_fixture_one),voice_expected_one,4800,0,0,0,false,ESP_OK);
+    ESP_LOGI(TAG,"AUDIO_PREWARM_SUITE pass=%u ready=%u cancelled=%u recovered=%u",(unsigned)(warm_pass&&cancelled&&recovered),(unsigned)ready,(unsigned)cancelled,(unsigned)recovered);
+#endif
     ESP_LOGI(TAG,"VOICE_PROBE_SUITE passed=%u total=%u sends=0",passed,total);
 }
 void feishu_asr_autotest_prepare(volatile bool *stop,volatile bool *cancel)

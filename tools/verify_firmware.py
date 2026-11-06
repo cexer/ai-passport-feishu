@@ -82,6 +82,19 @@ def verify_sqlite_ram(build_dir: Path) -> None:
         print(f"Verified SQLite initialized RAM: {end-start} bytes, loaded and excluded from heap")
 
 
+def verify_lvgl_pool(build_dir: Path) -> None:
+    """Catch a component update silently overriding the C3's 24 KiB UI pool."""
+    from elftools.elf.elffile import ELFFile
+    with (build_dir / "FoloToy-AI-Passport.elf").open("rb") as stream:
+        elf = ELFFile(stream)
+        symbols = elf.get_section_by_name(".symtab")
+        pools = [s for s in symbols.iter_symbols() if s.name.startswith("work_mem_int.")]
+        if len(pools) != 1 or pools[0]["st_size"] != 24 * 1024:
+            sizes = [s["st_size"] for s in pools]
+            raise ValueError(f"LVGL pool violates the 24 KiB budget: {sizes}")
+    print("Verified LVGL static pool: 24576 bytes")
+
+
 def main() -> int:
     build_dir = Path(sys.argv[1] if len(sys.argv) > 1 else "build").resolve()
     merged_path = build_dir / "FoloToy-AI-Passport-full.bin"
@@ -100,6 +113,7 @@ def main() -> int:
     try:
         verify_identity_window((build_dir / "partition_table/partition-table.bin").read_bytes())
         verify_sqlite_ram(build_dir)
+        verify_lvgl_pool(build_dir)
     except ValueError as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 1

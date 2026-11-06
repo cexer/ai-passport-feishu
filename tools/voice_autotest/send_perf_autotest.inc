@@ -14,9 +14,9 @@ static void perf_end(const char *name,esp_err_t result)
 {
     unsigned elapsed=(unsigned)((esp_timer_get_time()-perf_started)/1000);
     feishu_cache_pool_lock();feishu_flash_profile_t now=feishu_flash_profile();feishu_cache_pool_unlock();
-    printf("SEND_PERF step=%s result=%d ms=%u reads=%u writes=%u erases=%u read_ms=%u write_ms=%u erase_ms=%u\n",
+    printf("SEND_PERF step=%s result=%d ms=%u reads=%u writes=%u erases=%u read_ms=%u write_ms=%u erase_ms=%u mapped_reads=%u driver_reads=%u verify_reads=%u\n",
         name,result,elapsed,(unsigned)(now.reads-perf_before.reads),(unsigned)(now.writes-perf_before.writes),(unsigned)(now.erases-perf_before.erases),
-        (unsigned)((now.read_us-perf_before.read_us)/1000),(unsigned)((now.write_us-perf_before.write_us)/1000),(unsigned)((now.erase_us-perf_before.erase_us)/1000));
+        (unsigned)((now.read_us-perf_before.read_us)/1000),(unsigned)((now.write_us-perf_before.write_us)/1000),(unsigned)((now.erase_us-perf_before.erase_us)/1000),(unsigned)(now.mapped_reads-perf_before.mapped_reads),(unsigned)(now.driver_reads-perf_before.driver_reads),(unsigned)(now.verify_reads-perf_before.verify_reads));
 }
 #define PERF_STEP(name,call) do {perf_start();err=(call);perf_end(name,err);if(err!=ESP_OK)goto perf_done;}while(0)
 static void send_perf_autotest(feishu_api_session_t *s)
@@ -25,6 +25,20 @@ static void send_perf_autotest(feishu_api_session_t *s)
     snprintf(text,sizeof(text),"[性能测试] 飞书终端发送耗时检查 #%08lx",(unsigned long)esp_random());
     feishu_outbox_t p={0},check={0};feishu_data_writer_t body={0};
     int slot=-1;esp_err_t err=ESP_OK;bool passed=false;char uuid[24],name[48];
+    /* Discard only this harness's old disposable artifacts. A failed API call
+     * may already have sent them: never retry them or touch genuine drafts. */
+    for(unsigned i=0;i<FEISHU_OUTBOX_SLOTS;++i) {
+        esp_err_t rc=feishu_cache_pending_read(i,&check);
+        bool own_perf=rc==ESP_OK && !strncmp(check.body_name,"sendperf_perf-",14) && !strncmp(check.uuid,"perf-",5);
+        if(own_perf && !strcmp(check.chat,BUSINESS_CHAT)) {
+            printf("TEST_CLEANUP slot=%u state=%u owned=sendperf\n",i,(unsigned)check.state);
+            check.state=FEISHU_OUTBOX_EMPTY;check.offset=check.length;
+            err=feishu_cache_pending_write(i,&check,NULL);if(err!=ESP_OK)goto perf_done;
+        }
+    }
+#ifdef FEISHU_PERF_VOICE_SUITE
+    feishu_asr_autotest(s);
+#endif
     printf("SEND_PERF_BEGIN sends_max=1 durable=1\n");
     /* A prior unfinished performance draft blocks automatic re-entry. */
     for(unsigned i=0;i<FEISHU_OUTBOX_SLOTS;++i) {

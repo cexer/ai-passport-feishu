@@ -9,6 +9,8 @@ typedef struct {uint64_t generation;uint32_t length,crc;int status;} record_t;
 static struct {bool active;unsigned key,slot;uint64_t generation;} writing;
 static struct {uint64_t epoch;unsigned key,slot;record_t records[2];bool valid;} proofs[4];
 static unsigned next_proof;
+static bool garbage_clean;
+static uint64_t garbage_root_epoch;
 static uint32_t get32(const uint8_t *p)
 {return (uint32_t)p[0]|(uint32_t)p[1]<<8|(uint32_t)p[2]<<16|(uint32_t)p[3]<<24;}
 static uint64_t get64(const uint8_t *p) {return get32(p)|((uint64_t)get32(p+4)<<32);}
@@ -192,8 +194,15 @@ static bool obsolete(const char *name,size_t size,void *context)
 int feishu_root_flashdb_collect(size_t *bytes)
 {
     if(!bytes)return FEISHU_ROOT_INVALID;
-    *bytes=0;garbage_t g={0};int rc=mapped(feishu_fdb_visit(obsolete,&g));if(rc)return rc;
+    *bytes=0;
+    if(feishu_fdb_status()!=FEISHU_FDB_OK)return FEISHU_ROOT_IO;
+    uint64_t epoch=feishu_fdb_root_revision();
+    if(!writing.active && garbage_clean && garbage_root_epoch==epoch)return FEISHU_ROOT_MISSING;
+    garbage_t g={0};int rc=mapped(feishu_fdb_visit(obsolete,&g));if(rc)return rc;
     if(g.error)return g.error;
-    if(!g.name[0])return FEISHU_ROOT_MISSING;
+    if(!g.name[0]) {
+        if(!writing.active){garbage_clean=true;garbage_root_epoch=epoch;}
+        return FEISHU_ROOT_MISSING;
+    }
     rc=mapped(feishu_fdb_delete(g.name));if(!rc)*bytes=g.size;return rc;
 }

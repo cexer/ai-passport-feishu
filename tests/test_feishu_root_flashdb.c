@@ -77,9 +77,18 @@ int main(void)
         assert(feishu_root_write(&root,7,&replacement,1)==FEISHU_ROOT_OK);
     }
     unsigned collected=0;
-    for(unsigned i=0;i<512;++i){size_t bytes=0;int rc=feishu_root_flashdb_collect(&bytes);
+    for(unsigned i=0;i<4096;++i){size_t bytes=0;int rc=feishu_root_flashdb_collect(&bytes);
         if(rc==FEISHU_ROOT_MISSING)break;assert(rc==FEISHU_ROOT_OK && bytes);++collected;}
     assert(collected);expect(7,new_data,sizeof(new_data));expect(9,large,sizeof(large));
+    size_t none=0;feishu_fdb_host_fault(-1,-1,false);
+    assert(feishu_root_flashdb_collect(&none)==FEISHU_ROOT_MISSING && !feishu_fdb_host_reads());
+    assert(feishu_fdb_put("object-test",new_data,32)==FEISHU_FDB_OK);
+    feishu_fdb_host_fault(-1,-1,false);
+    assert(feishu_root_flashdb_collect(&none)==FEISHU_ROOT_MISSING && !feishu_fdb_host_reads());
+    reopen();feishu_fdb_host_fault(-1,-1,false);
+    assert(feishu_root_flashdb_collect(&none)==FEISHU_ROOT_MISSING && feishu_fdb_host_reads());
+    new_data[0]^=1;assert(feishu_root_write(&root,7,&replacement,1)==FEISHU_ROOT_OK);
+    assert(feishu_root_flashdb_collect(&none)==FEISHU_ROOT_OK && none);expect(7,new_data,sizeof(new_data));
     assert(feishu_root_write(&root,11,NULL,0)==FEISHU_ROOT_OK);
     assert(feishu_root_read(&root,11,0,NULL,0,&n)==FEISHU_ROOT_OK && !n);
     /* Two damaged logical manifests cannot authorize an implicit reset. */

@@ -23,7 +23,7 @@ class DeviceFontTest(unittest.TestCase):
     def test_full_cjk_including_last_sixteen(self):
         self.assertFalse(set(range(0x4e00,0xa000))-self.codes)
         self.assertFalse(set(range(0x20,0x7f))-self.codes)
-        expected=json.loads(Path('assets/fonts/SourceHanSansSC-Normal-2.005.json').read_text())
+        expected=json.loads(Path('assets/fonts/SourceHanSansSC-Medium-2.005.json').read_text())
         self.assertEqual(len(self.codes),expected['codepoints'])
 
     def test_grayscale_decoder_and_product_metrics(self):
@@ -34,11 +34,12 @@ class DeviceFontTest(unittest.TestCase):
         self.assertIn('CONFIG_LV_FONT_FMT_TXT_LARGE=y',defaults)
         import hashlib
         bitmap=Path('assets/fonts/feishu-14-4bpp.bin').read_bytes()
-        self.assertEqual(len(bitmap),1737446)
+        self.assertEqual(len(bitmap),1814190)
+        self.assertLessEqual(len(bitmap),0x200000)
         expected=hashlib.sha256(bitmap).digest()
         actual=bytes(int(x,16) for x in re.search(r'expected\[32\]=\{([^}]+)',self.clean).group(1).split(','))
         self.assertEqual(actual,expected)
-        self.assertIn('esp_partition_mmap(part,0,1737446',self.clean)
+        self.assertIn('esp_partition_mmap(part,0,1814190',self.clean)
         self.assertIn('esp_partition_munmap(handle)',self.clean)
 
 if __name__=='__main__':unittest.main()

@@ -1,5 +1,7 @@
 #include "feishu_flash_port.h"
 #include "esp_partition.h"
+#include "esp_log.h"
+#include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #ifdef FEISHU_SEND_PERF_AUTOTEST
@@ -14,6 +16,14 @@ feishu_flash_profile_t feishu_flash_profile(void) {return profile;}
 #endif
 #define POOL_SIZE (1024u*1024u)
 static unsigned operations;
+static const esp_partition_t *mapped_partition;
+static const void *mapped_pool;
+static esp_partition_mmap_handle_t mapped_handle;
+void feishu_flash_port_close(void)
+{
+    if(mapped_pool)esp_partition_munmap(mapped_handle);
+    mapped_pool=NULL;mapped_partition=NULL;mapped_handle=0;
+}
 static void cooperate(void) {if((++operations&127u)==0)vTaskDelay(1);}
 #ifdef FEISHU_STORAGE_AUTOTEST
 static int read_left=-1,write_left=-1;
@@ -32,9 +42,45 @@ static int read_bytes(void *ctx,uint32_t at,void *out,size_t size)
 #ifdef FEISHU_STORAGE_AUTOTEST
     if(trip(&read_left))return -1;
 #endif
-    PROFILE_START();esp_err_t result=esp_partition_read(ctx,at,out,size);PROFILE_END(read);
+    const esp_partition_t *partition=ctx;
+    if(at>partition->size || size>partition->size-at)return -1;
+    PROFILE_START();esp_err_t result=ESP_OK;
+    if(mapped_pool && partition==mapped_partition) {
+        memcpy(out,(const uint8_t *)mapped_pool+at,size);
+#ifdef FEISHU_SEND_PERF_AUTOTEST
+        ++profile.mapped_reads;
+#endif
+    } else {
+        result=esp_partition_read(ctx,at,out,size);
+#ifdef FEISHU_SEND_PERF_AUTOTEST
+        ++profile.driver_reads;
+#endif
+    }
+    PROFILE_END(read);
     return result==ESP_OK?(int)size:-1;
 }
+#ifdef FEISHU_SEND_PERF_AUTOTEST
+static void prime_mapping(uint32_t at,size_t size)
+{
+    if(mapped_pool && size) {
+        volatile const uint8_t *p=mapped_pool;
+        volatile uint8_t old=p[at];old=p[at+size-1];(void)old;
+    }
+}
+static esp_err_t verify_mapping(const esp_partition_t *p,uint32_t at,size_t size)
+{
+    if(!mapped_pool || p!=mapped_partition)return ESP_OK;
+    uint8_t reference[64];
+    for(size_t offset=0;offset<size;) {
+        size_t n=size-offset;if(n>sizeof(reference))n=sizeof(reference);
+        ++profile.verify_reads;
+        esp_err_t err=esp_partition_read(p,at+offset,reference,n);if(err!=ESP_OK)return err;
+        if(memcmp(reference,(const uint8_t *)mapped_pool+at+offset,n))return ESP_ERR_INVALID_STATE;
+        offset+=n;
+    }
+    return ESP_OK;
+}
+#endif
 static int write_bytes(void *ctx,uint32_t at,const void *in,size_t size)
 {
     cooperate();
@@ -45,7 +91,14 @@ static int write_bytes(void *ctx,uint32_t at,const void *in,size_t size)
         return -1;
     }
 #endif
-    PROFILE_START();esp_err_t result=esp_partition_write(ctx,at,in,size);PROFILE_END(write);
+#ifdef FEISHU_SEND_PERF_AUTOTEST
+    prime_mapping(at,size);
+#endif
+    PROFILE_START();esp_err_t result=esp_partition_write(ctx,at,in,size);
+#ifdef FEISHU_SEND_PERF_AUTOTEST
+    if(result==ESP_OK)result=verify_mapping(ctx,at,size);
+#endif
+    PROFILE_END(write);
     return result==ESP_OK?(int)size:-1;
 }
 static int erase_bytes(void *ctx,uint32_t at,size_t size)
@@ -55,7 +108,14 @@ static int erase_bytes(void *ctx,uint32_t at,size_t size)
     if(tripped)++after_fault;
     if(trip(&write_left))return -1;
 #endif
-    PROFILE_START();esp_err_t result=esp_partition_erase_range(ctx,at,size);PROFILE_END(erase);
+#ifdef FEISHU_SEND_PERF_AUTOTEST
+    prime_mapping(at,size);
+#endif
+    PROFILE_START();esp_err_t result=esp_partition_erase_range(ctx,at,size);
+#ifdef FEISHU_SEND_PERF_AUTOTEST
+    if(result==ESP_OK)result=verify_mapping(ctx,at,size);
+#endif
+    PROFILE_END(erase);
     return result==ESP_OK?(int)size:-1;
 }
 esp_err_t feishu_flash_port_open(feishu_fdb_io_t *io)
@@ -64,5 +124,13 @@ esp_err_t feishu_flash_port_open(feishu_fdb_io_t *io)
     const esp_partition_t *p=esp_partition_find_first(ESP_PARTITION_TYPE_DATA,
         ESP_PARTITION_SUBTYPE_ANY,"feishu_img");
     if(!p || p->address!=0x370000 || p->size!=POOL_SIZE)return ESP_ERR_INVALID_SIZE;
+    if(!mapped_pool) {
+        const void *address=NULL;esp_partition_mmap_handle_t handle=0;
+        /* ESP-IDF flushes mapped Flash cache lines after writes and erases.
+         * No copy of the 1 MiB pool is allocated in application RAM. */
+        esp_err_t mapped=esp_partition_mmap(p,0,p->size,ESP_PARTITION_MMAP_DATA,&address,&handle);
+        if(mapped==ESP_OK){mapped_pool=address;mapped_handle=handle;mapped_partition=p;}
+        ESP_LOGI("feishu_flash","FLASH_READ_PATH mapped=%u pool_bytes=%u result=%d",mapped_pool?1u:0u,(unsigned)p->size,mapped);
+    }
     *io=(feishu_fdb_io_t){(void *)p,POOL_SIZE,read_bytes,write_bytes,erase_bytes};return ESP_OK;
 }

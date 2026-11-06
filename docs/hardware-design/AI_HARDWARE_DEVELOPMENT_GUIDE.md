@@ -156,7 +156,7 @@ The audio demo's three-second recording buffer is about 96 KB and is the largest
 
 ## 9. CW2017 fuel gauge
 
-Initialization reads VERSION, writes CONFIG `0x00`, waits 100 ms, and uses the chip's built-in Li-Poly profile. The repository intentionally does not write a custom cell profile.
+Initialization reads VERSION and verifies the AI Passport 520 mAh profile against the board-specific bytes used by its XiaoZhi port. A missing or different profile is written in sleep mode and read back before setting its update flag; the gauge is then restarted into active mode. Initial SOC polling is bounded to five seconds. Later unavailable readings do not repeat that blocking wait. Different battery variants require their own verified profile.
 
 - SOC uses registers `0x04–0x05`; values above 100 are treated as not ready and return `-1`.
 - Voltage uses the 14-bit value at `0x02–0x03`, converted as `raw × 312.5 µV`, and returned in mV.

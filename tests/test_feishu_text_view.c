@@ -23,8 +23,8 @@ int main(void)
     assert(count==total && !memcmp(joined,text,total));
     char out[FEISHU_TEXT_PAGE_CAP];size_t used;
     assert(feishu_text_page(text,0,0,0,0,out,&used) && used==0);
-    assert(!feishu_text_page(text,1,0,512,0,out,&used));
-    assert(!feishu_text_page(text,256,0,512,1,out,&used));
+    assert(!feishu_text_page(text,1,0,FEISHU_TEXT_PAGE_STEP*2,0,out,&used));
+    assert(!feishu_text_page(text,FEISHU_TEXT_PAGE_STEP,0,FEISHU_TEXT_PAGE_STEP*2,1,out,&used));
     puts("text page boundaries: PASS");
     return 0;
 }

@@ -83,6 +83,11 @@ feishu_nav_action_t feishu_nav_handle(feishu_nav_t *nav,
         }
         break;
     case FEISHU_PAGE_MESSAGES:
+        if(event==FEISHU_NAV_COMPOSE)nav->composer_selected=true;
+        if(event==FEISHU_NAV_BROWSE && nav->message_count) {
+            nav->composer_selected=false;
+            if(nav->message_index>=nav->message_count)nav->message_index=nav->message_count-1;
+        }
         if (event == FEISHU_NAV_UP) {
             if (nav->composer_selected && nav->message_count > 0) {
                 nav->composer_selected = false;
@@ -101,7 +106,8 @@ feishu_nav_action_t feishu_nav_handle(feishu_nav_t *nav,
         }
         if (event == FEISHU_NAV_OK && nav->composer_selected) {
             nav->reply_to_message = false;
-            nav->page = FEISHU_PAGE_REPLY_READY;
+            nav->page = FEISHU_PAGE_RECORDING;
+            return FEISHU_NAV_START_RECORDING;
         } else if (event == FEISHU_NAV_OK && nav->message_count > 0) {
             nav->page = FEISHU_PAGE_MESSAGE_DETAIL;
         }
@@ -110,7 +116,8 @@ feishu_nav_action_t feishu_nav_handle(feishu_nav_t *nav,
     case FEISHU_PAGE_MESSAGE_DETAIL:
         if (event == FEISHU_NAV_OK) {
             nav->reply_to_message = true;
-            nav->page = FEISHU_PAGE_REPLY_READY;
+            nav->page = FEISHU_PAGE_RECORDING;
+            return FEISHU_NAV_START_RECORDING;
         }
         if (event == FEISHU_NAV_BACK) nav->page = FEISHU_PAGE_MESSAGES;
         break;
@@ -172,7 +179,7 @@ feishu_nav_action_t feishu_nav_handle(feishu_nav_t *nav,
         if(event==FEISHU_NAV_DOWN)move_selection(&nav->settings_index,6,1);
         if(event==FEISHU_NAV_BACK)nav->page=FEISHU_PAGE_IMAGE;
         if(event==FEISHU_NAV_OK) {
-            if(nav->settings_index==0) {nav->reply_to_message=true;nav->page=FEISHU_PAGE_REPLY_READY;return FEISHU_NAV_NONE;}
+            if(nav->settings_index==0) {nav->reply_to_message=true;nav->page=FEISHU_PAGE_RECORDING;return FEISHU_NAV_START_RECORDING;}
             nav->page=FEISHU_PAGE_IMAGE;
             if(nav->settings_index==1)return FEISHU_NAV_IMAGE_ZOOM_IN;
             if(nav->settings_index==2)return FEISHU_NAV_IMAGE_ZOOM_OUT;
@@ -187,22 +194,45 @@ feishu_nav_action_t feishu_nav_handle(feishu_nav_t *nav,
         if(event==FEISHU_NAV_OK && nav->draft_count)return FEISHU_NAV_OPEN_DRAFT;
         break;
     case FEISHU_PAGE_SETTINGS:
-        if (event == FEISHU_NAV_UP) move_selection(&nav->settings_index, 5, -1);
-        if (event == FEISHU_NAV_DOWN) move_selection(&nav->settings_index, 5, 1);
+        if (event == FEISHU_NAV_UP) move_selection(&nav->settings_index, FEISHU_SETTING_COUNT, -1);
+        if (event == FEISHU_NAV_DOWN) move_selection(&nav->settings_index, FEISHU_SETTING_COUNT, 1);
         if (event == FEISHU_NAV_BACK) nav->page = FEISHU_PAGE_CHATS;
         if (event == FEISHU_NAV_OK) {
-            if (nav->settings_index < 2) {
-                nav->confirm_action = nav->settings_index + 1;
-                nav->page = FEISHU_PAGE_CONFIRM;
-            } else if(nav->settings_index==2) {
+            if (nav->settings_index == FEISHU_SETTING_NETWORK) {
+                nav->page = FEISHU_PAGE_NETWORK;
+                nav->settings_index=0;
+                return FEISHU_NAV_LIST_NETWORK;
+            } else if(nav->settings_index==FEISHU_SETTING_ACCOUNT) {
+                nav->page=FEISHU_PAGE_ACCOUNT;nav->settings_index=0;
+            } else if(nav->settings_index==FEISHU_SETTING_DRAFTS) {
                 nav->page=FEISHU_PAGE_DRAFTS;nav->draft_manager=true;nav->draft_index=nav->draft_count=0;
                 return FEISHU_NAV_LIST_DRAFTS;
-            } else if(nav->settings_index==3) {
-                nav->confirm_action=3;nav->page=FEISHU_PAGE_CONFIRM;
+            } else if(nav->settings_index==FEISHU_SETTING_XIAOZHI) {
+                nav->page=FEISHU_PAGE_XIAOZHI;return FEISHU_NAV_CHECK_XIAOZHI;
             } else {
                 nav->page = FEISHU_PAGE_CHATS;
             }
         }
+        break;
+    case FEISHU_PAGE_XIAOZHI:
+        if(event==FEISHU_NAV_OK)return FEISHU_NAV_CHECK_XIAOZHI;
+        if(event==FEISHU_NAV_BACK)nav->page=FEISHU_PAGE_SETTINGS;
+        break;
+    case FEISHU_PAGE_ACCOUNT:
+        if(event==FEISHU_NAV_UP)move_selection(&nav->settings_index,3,-1);
+        if(event==FEISHU_NAV_DOWN)move_selection(&nav->settings_index,3,1);
+        if(event==FEISHU_NAV_BACK){nav->page=FEISHU_PAGE_SETTINGS;nav->settings_index=FEISHU_SETTING_ACCOUNT;}
+        if(event==FEISHU_NAV_OK) {
+            if(nav->settings_index==0)return FEISHU_NAV_REAUTHORIZE;
+            if(nav->settings_index==1){nav->confirm_action=2;nav->page=FEISHU_PAGE_CONFIRM;}
+            else {nav->page=FEISHU_PAGE_SETTINGS;nav->settings_index=FEISHU_SETTING_ACCOUNT;}
+        }
+        break;
+    case FEISHU_PAGE_NETWORK:
+    case FEISHU_PAGE_NETWORK_SCAN:
+    case FEISHU_PAGE_NETWORK_PASSWORD:
+    case FEISHU_PAGE_NETWORK_ACTIONS:
+        if(event==FEISHU_NAV_BACK){nav->page=FEISHU_PAGE_SETTINGS;nav->settings_index=FEISHU_SETTING_NETWORK;}
         break;
     case FEISHU_PAGE_CONFIRM:
         if (event == FEISHU_NAV_OK) {
@@ -211,6 +241,7 @@ feishu_nav_action_t feishu_nav_handle(feishu_nav_t *nav,
         }
         if (event == FEISHU_NAV_UP || event == FEISHU_NAV_DOWN ||
             event == FEISHU_NAV_BACK) {
+            nav->settings_index=nav->confirm_action==1 ? FEISHU_SETTING_NETWORK:FEISHU_SETTING_ACCOUNT;
             nav->confirm_action = 0;
             nav->page = FEISHU_PAGE_SETTINGS;
         }
@@ -272,4 +303,19 @@ void feishu_avatar_text(char output[5],const char *text,const char *fallback)
         p+=n;
     }
     feishu_utf8_copy(output,5,fallback);
+}
+
+size_t feishu_message_window(const uint16_t *heights,size_t count,size_t selected,
+    unsigned pixels,size_t max_rows,size_t *start)
+{
+    *start=0;if(!count || !max_rows || !heights)return 0;
+    size_t first=selected<count ? selected:count-1,last=first;
+    unsigned used=heights[first];if(used>pixels){*start=first;return 0;}
+    while(first && last-first+1<max_rows && used+4u+heights[first-1]<=pixels) {
+        --first;used+=4u+heights[first];
+    }
+    while(last+1<count && last-first+1<max_rows && used+4u+heights[last+1]<=pixels) {
+        ++last;used+=4u+heights[last];
+    }
+    *start=first;return last-first+1;
 }

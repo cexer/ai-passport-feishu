@@ -22,7 +22,7 @@ esp_err_t feishu_pool_mount(const char *directory)
     printf("FEISHU_STORAGE backend=flashdb pool=%u\n",(unsigned)io.size);
     return ESP_OK;
 }
-void feishu_pool_unmount(void) {feishu_fdb_close();}
+void feishu_pool_unmount(void) {feishu_fdb_close();feishu_flash_port_close();}
 bool feishu_pool_room(size_t margin) {return feishu_fdb_room(margin);}
 esp_err_t feishu_pool_open_data(feishu_data_t *store,const char *directory,
                                uint64_t *floor,bool broken,feishu_pool_info_t *info)

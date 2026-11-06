@@ -1,12 +1,14 @@
 // components/bsp/src/bsp_battery.c
 // 移植自 trae_card/components/platform/platform_esp32/src/battery_cw2017.c
-// (去掉了电池 profile 写入部分:开源硬件用户电池各异,用芯片自带 Li-Poly profile 更通用)
+// AI Passport 520mAh 电池 profile；写入后逐字节读回确认。
 #include "bsp_battery.h"
 #include "bsp_i2c.h"
 #include "bsp_pins.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include <stdbool.h>
+#include <string.h>
 
 static const char *TAG = "bsp_batt";
 
@@ -16,6 +18,22 @@ static const char *TAG = "bsp_batt";
 #define CW_REG_CONFIG    0x08   // 0xF0=睡眠 / 0x30=复位态 / 0x00=正常
 
 static i2c_master_dev_handle_t s_dev;
+static bool s_ready;
+/* AI Passport 520 mAh cell profile, also used by the local XiaoZhi board port.
+ * This is board-specific, never a voltage-to-percent guess. */
+static const uint8_t s_profile[80]={
+    0x64, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0xAD, 0xC7, 0xC8, 0xCA, 0xBD, 0xB1, 0xC1, 0x94,
+    0x88, 0xD1, 0xBD, 0x97, 0x88, 0x66, 0x56, 0x4A,
+    0x3F, 0x33, 0x26, 0x5C, 0x37, 0xD1, 0x27, 0xD8,
+    0xCC, 0xB7, 0xCF, 0xB3, 0xB2, 0xAE, 0xA6, 0x9E,
+    0x99, 0x97, 0x9B, 0x86, 0x47, 0x1E, 0x17, 0x26,
+    0x49, 0x96, 0xD9, 0xE1, 0xDD, 0xDC, 0xD4, 0x59,
+    0x00, 0x00, 0x90, 0x02, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x64, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x5C,
+};
+
 
 static int cw_read(uint8_t reg, uint8_t *buf, size_t n) {
     if (!s_dev) return -1;
@@ -29,7 +47,7 @@ static int cw_write(uint8_t reg, uint8_t val) {
 }
 
 esp_err_t bsp_battery_init(void) {
-    if (s_dev) return ESP_OK;
+    if (s_ready) return ESP_OK;
 
     esp_err_t e = bsp_i2c_init();
     if (e != ESP_OK) return e;
@@ -39,7 +57,7 @@ esp_err_t bsp_battery_init(void) {
         .device_address  = BSP_I2C_CW2017_ADDR,
         .scl_speed_hz    = 100000,
     };
-    e = i2c_master_bus_add_device(bsp_i2c_bus(), &dc, &s_dev);
+    e = s_dev ? ESP_OK:i2c_master_bus_add_device(bsp_i2c_bus(), &dc, &s_dev);
     if (e != ESP_OK) { ESP_LOGE(TAG, "添加 I2C 设备失败: %s", esp_err_to_name(e)); return e; }
 
     uint8_t ver = 0;
@@ -52,11 +70,33 @@ esp_err_t bsp_battery_init(void) {
     }
     ESP_LOGI(TAG, "检测到 CW2017 VERSION=0x%02X", ver);
 
-    // 确保处于正常工作模式(非睡眠/复位态)。用芯片自带 Li-Poly profile,不写自定义 profile。
-    cw_write(CW_REG_CONFIG, 0x00);
-    vTaskDelay(pdMS_TO_TICKS(100));   // 等首次 SOC 计算完成
-
-    return ESP_OK;
+    uint8_t config=0,flag=0,profile[80];
+    if(cw_read(CW_REG_CONFIG,&config,1) || cw_read(0x0b,&flag,1) || cw_read(0x10,profile,sizeof(profile)))return ESP_FAIL;
+    bool match=(flag&0x80) && !memcmp(profile,s_profile,sizeof(profile));
+    if(!match) {
+        if(cw_write(CW_REG_CONFIG,0x30))return ESP_FAIL;
+        vTaskDelay(pdMS_TO_TICKS(20));
+        if(cw_write(CW_REG_CONFIG,0xf0))return ESP_FAIL;
+        for(unsigned i=0;i<sizeof(s_profile);++i)if(cw_write((uint8_t)(0x10+i),s_profile[i]))return ESP_FAIL;
+        if(cw_read(0x10,profile,sizeof(profile)) || memcmp(profile,s_profile,sizeof(profile)))return ESP_FAIL;
+        if(cw_write(0x0b,(uint8_t)(flag|0x80)))return ESP_FAIL;
+    }
+    if(!match || config!=0) {
+        if(cw_write(CW_REG_CONFIG,0x30))return ESP_FAIL;
+        vTaskDelay(pdMS_TO_TICKS(20));
+        if(cw_write(CW_REG_CONFIG,0))return ESP_FAIL;
+    }
+    s_ready=true; /* Configured; later SOC retries must not block the app for five seconds. */
+    for(unsigned i=0;i<50;++i) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+        if(bsp_battery_soc()>=0) {
+            s_ready=true;
+            ESP_LOGI(TAG,"BATTERY_READY profile=520mah updated=%u soc=%d mv=%d",(unsigned)!match,bsp_battery_soc(),bsp_battery_mv());
+            return ESP_OK;
+        }
+    }
+    ESP_LOGW(TAG,"BATTERY_WAIT soc_not_ready=1");
+    return ESP_ERR_TIMEOUT;
 }
 
 int bsp_battery_soc(void) {

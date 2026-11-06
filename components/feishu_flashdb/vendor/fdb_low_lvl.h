@@ -74,4 +74,7 @@ bool _fdb_read_cache_read(fdb_db_t db, uint32_t addr, void *buf, size_t size);
 void _fdb_read_cache_invalidate(fdb_db_t db, uint32_t addr);
 void _fdb_read_cache_release(fdb_db_t db);
 
+bool _fdb_kv_cache_contains(fdb_kvdb_t db,const char *key);
+void _fdb_kv_cache_hint(fdb_kvdb_t db,const char *key,uint32_t address);
+
 #endif /* _FDB_LOW_LVL_H_ */

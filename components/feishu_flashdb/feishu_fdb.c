@@ -2,6 +2,7 @@
 #include "flashdb.h"
 #include "fdb_low_lvl.h"
 #include <limits.h>
+#include <stdlib.h>
 #include <string.h>
 
 static struct fdb_kvdb database;
@@ -9,7 +10,9 @@ static feishu_fdb_io_t media;
 static bool claimed, opened, failed;
 static size_t used_upper,catalog_bytes;
 static uint8_t root_headers[64];
-static uint64_t mutation_epoch;
+static uint64_t mutation_epoch,root_epoch;
+static bool usage_may_overcount;
+uint64_t feishu_fdb_root_revision(void) {return root_epoch;}
 uint64_t feishu_fdb_revision(void) {return mutation_epoch;}
 static int root_header(const char *key)
 {
@@ -33,7 +36,9 @@ static bool count_record(const char *key,size_t size,void *ctx)
 static bool recount(void)
 {
     used_upper=catalog_bytes=0;memset(root_headers,0,sizeof(root_headers));
-    return feishu_fdb_visit(count_record,NULL)==FEISHU_FDB_OK;
+    bool ok=feishu_fdb_visit(count_record,NULL)==FEISHU_FDB_OK;
+    if(ok)usage_may_overcount=false;
+    return ok;
 }
 static struct fal_partition pool = {
     .magic_word=0x45503130, .name="feishu-pool", .flash_name="feishu-raw"
@@ -74,11 +79,24 @@ int fal_partition_erase(const struct fal_partition *part,uint32_t pos,size_t siz
 {
     ++mutation_epoch;
     if(!valid(part,pos,size) || pos%4096 || size%4096 ||
-       media.erase(media.ctx,pos,size)!=(int)size) {
+       !size) {
         failed=true;
         return -1;
     }
+    /* Logical KV sectors are 16 KiB, physical erase units only 4 KiB.
+     * Preserve the GC/recovery header until every payload unit is erased.
+     * Otherwise a reset after the first unit leaves an unknown header above
+     * occupied bytes, which safe non-destructive open must reject. */
+    for(size_t base=0;base<size;base+=16384) {
+        size_t chunk=size-base;if(chunk>16384)chunk=16384;
+        for(size_t offset=4096;offset<chunk;offset+=4096) {
+            if(media.erase(media.ctx,pos+(uint32_t)(base+offset),4096)!=4096)goto io_failed;
+        }
+        if(media.erase(media.ctx,pos+(uint32_t)base,4096)!=4096)goto io_failed;
+    }
     return (int)size;
+io_failed:
+    failed=true;return -1;
 }
 static int result(fdb_err_t rc)
 {
@@ -95,6 +113,7 @@ int feishu_fdb_status(void)
 }
 void feishu_fdb_close(void)
 {
+    ++root_epoch;usage_may_overcount=false;
     ++mutation_epoch;
     if(claimed) fdb_kvdb_deinit(&database);
     memset(&database,0,sizeof(database));
@@ -146,6 +165,7 @@ int feishu_fdb_put(const char *key,const void *data,size_t size)
     if(!key_valid(key) || !data || !size) return FEISHU_FDB_INVALID;
     /* Object adapter splits larger values into bounded immutable chunks. */
     if(size>8192) return FEISHU_FDB_TOOBIG;
+    if(key[0]=='r')++root_epoch;
     struct fdb_blob blob;
     int saved=result(fdb_kv_set_blob(&database,key,fdb_blob_make(&blob,data,size)));
     if(!saved) {
@@ -153,10 +173,12 @@ int feishu_fdb_put(const char *key,const void *data,size_t size)
         int root=root_header(key);
         if(!strcmp(key,"@catalog")){old=catalog_bytes;catalog_bytes=n;}
         else if(root>=0) {
+            if(size!=32 || !(root_headers[root/8]&(1u<<(root%8))))usage_may_overcount=true;
             if(root_headers[root/8]&(1u<<(root%8)))old=record_bytes(key,32);
             if(size==32)root_headers[root/8]|=(uint8_t)(1u<<(root%8));
             else root_headers[root/8]&=(uint8_t)~(1u<<(root%8));
         }
+        else usage_may_overcount=true;
         used_upper=used_upper>=old?used_upper-old+n:n;
     }
     return saved;
@@ -194,6 +216,7 @@ int feishu_fdb_delete(const char *key)
     fdb_kv_t found=fdb_kv_get_obj(&database,key,&object);
     if(feishu_fdb_status())return FEISHU_FDB_IO;
     size_t removed=found?record_bytes(key,object.value_len):0;
+    if(key[0]=='r')++root_epoch;
     int saved=result(fdb_kv_del(&database,key));
     if(!saved)used_upper=used_upper>=removed?used_upper-removed:0;
     return saved;
@@ -220,5 +243,54 @@ bool feishu_fdb_room(size_t margin)
     if(used_upper<=budget && margin<=budget-used_upper)return true;
     /* Retried immutable-key writes may overcount. Recount only under pressure
      * rather than scanning the pool for each ordinary append. */
-    return recount() && used_upper<=budget && margin<=budget-used_upper;
+    return usage_may_overcount && recount() && used_upper<=budget && margin<=budget-used_upper;
+}
+
+int feishu_fdb_collect_if(feishu_fdb_visit_t match,void *ctx,size_t *bytes)
+{
+    if(!match || !bytes)return FEISHU_FDB_INVALID;
+    *bytes=0;int rc=feishu_fdb_status();if(rc)return rc;
+    typedef struct {char key[FDB_KV_NAME_MAX+1];uint32_t address;size_t size;} candidate_t;
+    candidate_t single={0},*allocated=calloc(32,sizeof(candidate_t));
+    candidate_t *items=allocated?allocated:&single;unsigned count=0,capacity=allocated?32u:1u;
+    struct fdb_kv_iterator iterator;fdb_kv_iterator_init(&database,&iterator);
+    while(count<capacity && fdb_kv_iterate(&database,&iterator)) {
+        if(feishu_fdb_status()!=FEISHU_FDB_OK)break;
+        if(match(iterator.curr_kv.name,iterator.curr_kv.value_len,ctx)) {
+            candidate_t *item=&items[count++];
+            memcpy(item->key,iterator.curr_kv.name,iterator.curr_kv.name_len+1);
+            item->address=iterator.curr_kv.addr.start;item->size=iterator.curr_kv.value_len;
+        }
+    }
+    _fdb_read_cache_release((fdb_db_t)&database);
+    rc=feishu_fdb_status();
+    if(!rc)for(unsigned i=0;i<count;++i) {
+        _fdb_kv_cache_hint(&database,items[i].key,items[i].address);
+        rc=feishu_fdb_status();if(rc)break;
+    }
+    if(!rc)for(unsigned i=0;i<count;++i) {
+        rc=feishu_fdb_delete(items[i].key);if(rc)break;
+        *bytes+=items[i].size;
+    }
+    free(allocated);return rc;
+}
+
+int feishu_fdb_prefetch(const char *prefix,const char *first,const char *last,unsigned count)
+{
+    int rc=feishu_fdb_status();if(rc)return rc;
+    if(!key_valid(prefix) || !key_valid(first) || !key_valid(last) || !count)return FEISHU_FDB_INVALID;
+    bool cached=_fdb_kv_cache_contains(&database,first) && _fdb_kv_cache_contains(&database,last);
+    _fdb_read_cache_release((fdb_db_t)&database);
+    rc=feishu_fdb_status();if(rc || cached)return rc;
+    size_t length=strlen(prefix);unsigned found=0;
+    struct fdb_kv_iterator iterator;fdb_kv_iterator_init(&database,&iterator);
+    while(fdb_kv_iterate(&database,&iterator)) {
+        if(feishu_fdb_status()!=FEISHU_FDB_OK)break;
+        if(!strncmp(iterator.curr_kv.name,prefix,length)) {
+            _fdb_kv_cache_hint(&database,iterator.curr_kv.name,iterator.curr_kv.addr.start);
+            if(++found>=count)break;
+        }
+    }
+    _fdb_read_cache_release((fdb_db_t)&database);
+    return feishu_fdb_status();
 }

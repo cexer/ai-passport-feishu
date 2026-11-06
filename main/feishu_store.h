@@ -12,6 +12,7 @@
 #define FEISHU_TOKEN_MAX 8192
 #define FEISHU_STORE_ERR_FULL ((esp_err_t)0x7f10)
 #define FEISHU_STORE_ERR_CORRUPT ((esp_err_t)0x7f11)
+#define FEISHU_STORE_ERR_WIFI_EMPTY ((esp_err_t)0x7f1b)
 #define FEISHU_VOICE_COOKIE_MAX 4097
 /* Separate web session, scoped to the current app binding; never replaces OAuth. */
 esp_err_t feishu_store_load_voice_cookie(char *cookie,size_t capacity);
@@ -52,6 +53,16 @@ bool feishu_store_wifi_setup_required(void);
 esp_err_t feishu_store_require_wifi_setup(bool required);
 esp_err_t feishu_store_load_wifi(void *config,size_t size);
 esp_err_t feishu_store_save_wifi(const void *config,size_t size);
+#define FEISHU_WIFI_SAVED_MAX 10
+/* SSIDs only: passwords never enter list UI or logs. */
+esp_err_t feishu_store_list_wifi(char names[FEISHU_WIFI_SAVED_MAX][33],size_t *count,size_t *active,size_t config_size);
+esp_err_t feishu_store_get_wifi(size_t index,void *config,size_t size);
+esp_err_t feishu_store_update_wifi(size_t index,const void *config,size_t size);
+esp_err_t feishu_store_remove_wifi(size_t index,size_t config_size);
 enum { FEISHU_AUTH_NONE,FEISHU_AUTH_REAUTHORIZE,FEISHU_AUTH_CHANGE_APP,FEISHU_AUTH_REPAIR_APP };
 esp_err_t feishu_store_get_auth_request(unsigned *request);
 esp_err_t feishu_store_request_auth(unsigned request);
+
+#define FEISHU_XIAOZHI_CONFIG_MAX 1536
+esp_err_t feishu_store_load_xiaozhi(char *json,size_t capacity);
+esp_err_t feishu_store_save_xiaozhi(const char *json);

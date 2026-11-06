@@ -14,6 +14,15 @@
 #define FEISHU_TEXT_MAX 256
 #define FEISHU_REPLY_MAX 512
 
+static inline size_t feishu_focus_step(size_t selected,size_t count,int direction,bool wrap)
+{
+    if(!count)return 0;
+    if(selected>=count)selected=count-1;
+    if(direction<0)return selected ? selected-1:(wrap ? count-1:0);
+    if(direction>0)return selected+1<count ? selected+1:(wrap ? 0:selected);
+    return selected;
+}
+
 typedef enum {
     FEISHU_MESSAGE_TEXT = 0,
     FEISHU_MESSAGE_AUDIO,
@@ -68,6 +77,12 @@ typedef enum {
     FEISHU_PAGE_DRAFT_ACTIONS,
     FEISHU_PAGE_IMAGE_ACTIONS,
     FEISHU_PAGE_DRAFTS,
+    FEISHU_PAGE_XIAOZHI,
+    FEISHU_PAGE_ACCOUNT,
+    FEISHU_PAGE_NETWORK,
+    FEISHU_PAGE_NETWORK_SCAN,
+    FEISHU_PAGE_NETWORK_PASSWORD,
+    FEISHU_PAGE_NETWORK_ACTIONS,
 } feishu_page_t;
 
 typedef enum {
@@ -75,7 +90,18 @@ typedef enum {
     FEISHU_NAV_DOWN,
     FEISHU_NAV_OK,
     FEISHU_NAV_BACK,
+    FEISHU_NAV_COMPOSE,
+    FEISHU_NAV_BROWSE,
 } feishu_nav_event_t;
+
+typedef enum {
+    FEISHU_SETTING_ACCOUNT = 0,
+    FEISHU_SETTING_XIAOZHI,
+    FEISHU_SETTING_NETWORK,
+    FEISHU_SETTING_DRAFTS,
+    FEISHU_SETTING_RETURN,
+    FEISHU_SETTING_COUNT,
+} feishu_setting_t;
 
 typedef enum {
     FEISHU_NAV_NONE = 0,
@@ -95,6 +121,8 @@ typedef enum {
     FEISHU_NAV_LIST_DRAFTS,
     FEISHU_NAV_OPEN_DRAFT,
     FEISHU_NAV_REAUTHORIZE,
+    FEISHU_NAV_CHECK_XIAOZHI,
+    FEISHU_NAV_LIST_NETWORK,
 } feishu_nav_action_t;
 
 typedef struct {
@@ -124,3 +152,7 @@ size_t feishu_text_preview(char *dst,size_t capacity,const char *src,bool trunca
 
 /* Avatar initials skip punctuation; ASCII pairs or one supported CJK glyph. */
 void feishu_avatar_text(char output[5],const char *text,const char *fallback);
+
+/* Fit a contiguous variable-height window; selected==count follows latest. */
+size_t feishu_message_window(const uint16_t *heights,size_t count,size_t selected,
+    unsigned pixels,size_t max_rows,size_t *start);
