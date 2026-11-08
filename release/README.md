@@ -24,6 +24,8 @@ full image contains blank address gaps, including data storage; flashing it
 may clear existing data. For an existing device, use the matching APP-only
 update to preserve its data.
 
-R80 passed the targeted power-policy device gate. A subsequently reported UI
-freeze and slow startup remain under investigation; this archive does not claim
-that these symptoms are resolved or that battery endurance was measured.
+R80 passed the targeted power-policy device gate. The subsequent frozen-screen
+report was traced to the test controller leaving the device in flasher download
+mode after installing the ordinary APP: a no-reset handshake confirmed that
+state. The LCD retained the last conversation frame; restart to run the APP.
+Slow startup remains under investigation, and battery endurance was not measured.
