@@ -98,6 +98,50 @@ int main(void)
         assert(feishu_cache_text_read_stream(loaded.body_name,loaded.object_id,false,0,out,sizeof(out),&n)==ESP_OK &&
             n==strlen(text) && !memcmp(out,text,n));
     }
+    int chosen=-1;
+    assert(feishu_cache_draft_slot(&chosen)==ESP_OK && chosen==0);
+    assert(feishu_cache_pending_read(0,&loaded)==ESP_OK);
+    feishu_outbox_t predecessor=loaded;
+    assert(feishu_outbox_attempt(&loaded,false));feishu_outbox_failed(&loaded,false);
+    assert(feishu_cache_pending_write(0,&loaded,NULL)==ESP_OK);
+    assert(feishu_cache_draft_slot(&chosen)==ESP_OK && chosen==0); /* User policy replaces failed records too. */
+    feishu_data_writer_t replacement={0};
+    assert(feishu_cache_draft_begin(&replacement)==ESP_OK);
+    assert(feishu_cache_text_append(&replacement,"new single draft",16)==ESP_OK);
+    feishu_outbox_t next;
+    assert(feishu_outbox_create(&next,replacement.id,replacement.raw,"single_fault","oc_new","","new-uuid"));
+    feishu_fdb_host_fault(-1,0,true);
+    assert(feishu_cache_pending_write(0,&next,&replacement)!=ESP_OK && feishu_fdb_host_tripped());
+    feishu_fdb_host_fault(-1,-1,false);feishu_cache_text_abort(&replacement);feishu_cache_unmount();
+    assert(feishu_cache_pending_read(0,&loaded)==ESP_OK && loaded.object_id==predecessor.object_id && loaded.state==FEISHU_OUTBOX_UNCERTAIN);
+    assert(feishu_cache_draft_begin(&replacement)==ESP_OK);
+    assert(feishu_cache_text_append(&replacement,"new single draft",16)==ESP_OK);
+    assert(feishu_outbox_create(&next,replacement.id,replacement.raw,"single_ok","oc_new","","new-uuid"));
+    assert(feishu_cache_pending_write(0,&next,&replacement)==ESP_OK);
+    assert(feishu_cache_prune_drafts(0,true)==ESP_OK);
+    assert(feishu_cache_pending_read(0,&loaded)==ESP_OK && loaded.object_id==next.object_id && !strcmp(loaded.chat,"oc_new"));
+    for(unsigned i=1;i<FEISHU_OUTBOX_SLOTS;++i)assert(feishu_cache_pending_read(i,&loaded)==ESP_ERR_NOT_FOUND);
+    feishu_cache_unmount();assert(feishu_cache_pending_read(0,&loaded)==ESP_OK && loaded.object_id==next.object_id);
+    assert(feishu_cache_prune_drafts(-1,true)==ESP_OK && feishu_cache_pending_empty());
+    assert(feishu_cache_draft_slot(&chosen)==ESP_OK && chosen==0);
+    puts("single draft: failed-send replacement, interrupted publication preserves old, prune/reopen/clear/reuse PASS");
+    draft(&loaded);int64_t disposable_id=loaded.object_id,lease=0;uint64_t length=0;
+    feishu_data_object_t policy;
+    feishu_fdb_host_fault(-1,0,true);feishu_cache_drafts_idle();
+    assert(feishu_fdb_host_tripped());feishu_fdb_host_fault(-1,-1,false);feishu_cache_unmount();
+    assert(feishu_cache_pending_read(0,&loaded)==ESP_OK);
+    assert(text_stat(loaded.body_name,disposable_id,&policy)==FEISHU_DATA_OK && policy.protected_data);
+    assert(feishu_cache_text_pin(loaded.body_name,disposable_id,false,&lease,&length)==ESP_OK);
+    feishu_cache_drafts_idle();
+    assert(text_stat(loaded.body_name,disposable_id,&policy)==FEISHU_DATA_OK && !policy.protected_data);
+    size_t reclaimed=0;
+    while(feishu_data_reclaim_category(&store,FEISHU_DATA_TEXT,&reclaimed)==FEISHU_DATA_OK){}
+    assert(feishu_cache_pending_read(0,&loaded)==ESP_OK && loaded.object_id==disposable_id);
+    feishu_cache_unpin(&lease);
+    while(feishu_data_reclaim_category(&store,FEISHU_DATA_TEXT,&reclaimed)==FEISHU_DATA_OK){}
+    assert(feishu_cache_pending_read(0,&loaded)==ESP_ERR_NOT_FOUND);
+    assert(feishu_cache_draft_slot(&chosen)==ESP_OK);
+    puts("disposable draft: interrupted policy change preserves old, active reader survives pressure, idle eviction removes ghost metadata PASS");
     assert(feishu_store_load_xiaozhi(config,sizeof(config))==ESP_OK && !strcmp(config,xiao));
     feishu_cache_unmount();assert(!lock_depth);
     puts("FlashDB app: fresh setup, no legacy import, shared configuration/cache, durable draft, uncertain send/retry UUID, IO reopen and cache pressure PASS");

@@ -34,6 +34,8 @@ Use this page to discover repository documentation. `authoritative` documents de
 | [hardware-design/AI_HARDWARE_DEVELOPMENT_GUIDE.md](hardware-design/AI_HARDWARE_DEVELOPMENT_GUIDE.md) | Board facts, constraints, validation, and troubleshooting | authoritative |
 | [hardware-design/specifications.md](hardware-design/specifications.md) | User-facing product specifications | authoritative |
 | [software-design/README.md](software-design/README.md) | Software-design document index | reference |
+| [software-design/feishu-assistant.md](software-design/feishu-assistant.md) | Global voice, collaborative drafts and bounded MCP contract | authoritative |
 | [software-design/feishu-messenger.md](software-design/feishu-messenger.md) | Direct-device Feishu messenger design and provisioning contract | authoritative |
+| [../release/README.md](../release/README.md) | Versioned BIN artifacts and preparation command | authoritative |
 
 GitHub community documents: [CONTRIBUTING.md](../.github/CONTRIBUTING.md), [CODE_OF_CONDUCT.md](../.github/CODE_OF_CONDUCT.md), [SECURITY.md](../.github/SECURITY.md), and [SUPPORT.md](../.github/SUPPORT.md).

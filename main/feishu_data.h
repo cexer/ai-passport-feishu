@@ -73,6 +73,9 @@ int feishu_data_release_orphan(feishu_data_t *store,const int64_t *active,size_t
 int feishu_data_read(feishu_data_t *store, int64_t id, unsigned sequence,
                       uint8_t *data, size_t capacity, size_t *size);
 int feishu_data_pin(feishu_data_t *store, int64_t id, bool pinned);
+/* Change eviction policy without changing the immutable payload. Reader pins
+ * continue to protect a disposable object while it is displayed or uploaded. */
+int feishu_data_set_protected(feishu_data_t *store,int64_t id,bool protected_data);
 int feishu_data_reclaim(feishu_data_t *store, size_t *bytes);
 int feishu_data_reclaim_category(feishu_data_t *store,feishu_data_kind_t kind,size_t *bytes);
 

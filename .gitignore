@@ -1,4 +1,6 @@
 build/
+/research/*/artifacts/
+/research/qualification-index.json
 sdkconfig
 sdkconfig.old
 managed_components/

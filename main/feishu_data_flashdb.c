@@ -166,6 +166,18 @@ int feishu_data_id_floor(feishu_data_t *s,uint64_t *floor)
 }
 void feishu_data_trim(feishu_data_t *s) {(void)s;}
 int feishu_data_shrink(feishu_data_t *s) {return valid(s)?FEISHU_DATA_OK:FEISHU_DATA_MISUSE;}
+int feishu_data_set_protected(feishu_data_t *s,int64_t id,bool protect)
+{
+    CHECK_STORE(s);
+    if(!valid(s) || id<=0)return FEISHU_DATA_MISUSE;
+    entry_t *e=by_id((uint64_t)id);
+    if(!e || e->state==STAGING)return FEISHU_DATA_NOTFOUND;
+    uint8_t previous=e->protected_data;
+    if(previous==(uint8_t)protect)return FEISHU_DATA_OK;
+    e->protected_data=(uint8_t)protect;int rc=save_catalog();
+    if(rc)e->protected_data=previous;
+    return rc;
+}
 int feishu_data_begin(feishu_data_t *s,const char *key,feishu_data_kind_t kind,bool protect,feishu_data_writer_t *w)
 {
     CHECK_STORE(s);

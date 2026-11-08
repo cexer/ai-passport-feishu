@@ -260,6 +260,11 @@ fdb_err_t _fdb_flash_read(fdb_db_t db, uint32_t addr, void *buf, size_t size)
 
     if (db->io_failed) { memset(buf,0,size); return FDB_READ_ERR; }
 
+    /* Cached scans may perform thousands of logical reads without entering
+     * the physical port. Preserve scheduler progress on both cache paths. */
+#ifdef FDB_COOPERATE
+    FDB_COOPERATE();
+#endif
     /* the read cache is above the storage layer, so it covers every backend */
 #if FDB_USING_READ_CACHE
     if (_fdb_read_cache_read(db, addr, buf, size)) {

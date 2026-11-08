@@ -25,6 +25,7 @@ static uint32_t scope_version;
 /* Four proven-empty flags, not draft bodies. Unknown/error states must read
  * durable metadata. Foreground empty checks never wait behind cache writes. */
 static atomic_uint pending_absent;
+static atomic_bool drafts_idle_marked;
 bool feishu_cache_pending_empty(void)
 { return atomic_load(&pending_absent)==((1u<<FEISHU_OUTBOX_SLOTS)-1); }
 /* Fixed leases survive a failed abort until the disk/allocator recovers. */
@@ -135,7 +136,7 @@ void feishu_cache_set_scope(const char *app,const char *owner)
 {
     if(!mutex || !app || !owner) return;
     xSemaphoreTakeRecursive(mutex,portMAX_DELAY);
-    if(strcmp(scope_app,app) || strcmp(scope_owner,owner)) {++scope_version;atomic_store(&pending_absent,0);}
+    if(strcmp(scope_app,app) || strcmp(scope_owner,owner)) {++scope_version;atomic_store(&pending_absent,0);atomic_store(&drafts_idle_marked,false);}
     snprintf(scope_app,sizeof(scope_app),"%s",app);
     snprintf(scope_owner,sizeof(scope_owner),"%s",owner);
     xSemaphoreGiveRecursive(mutex);
@@ -152,7 +153,7 @@ static esp_err_t mount_impl(void) {return feishu_pool_mount(FEISHU_CACHE_DIRECTO
 
 static void invalidate_leases(void)
 {
-    atomic_store(&pending_absent,0);
+    atomic_store(&pending_absent,0);atomic_store(&drafts_idle_marked,false);
     memset(writer_ids,0,sizeof(writer_ids));memset(writer_abandoned,0,sizeof(writer_abandoned));
     memset(readers,0,sizeof(readers));
 }
@@ -215,7 +216,7 @@ esp_err_t feishu_cache_release_space(void)
 
 static void close_impl(void)
 {
-    atomic_store(&pending_absent,0);
+    atomic_store(&pending_absent,0);atomic_store(&drafts_idle_marked,false);
     for(size_t i=0;i<16;++i)if(readers[i].count)return;
     if(feishu_data_close(&store)==FEISHU_DATA_OK) {
         memset(writer_ids,0,sizeof(writer_ids));memset(writer_abandoned,0,sizeof(writer_abandoned));
@@ -308,7 +309,7 @@ static int append(feishu_data_writer_t *w,const uint8_t *data,size_t size)
 static esp_err_t write_impl(const char *name,
                               const void *data,size_t unit,size_t count)
 {
-    if(name && !strncmp(name,"pending/",8))atomic_store(&pending_absent,0);
+    if(name && !strncmp(name,"pending/",8)){atomic_store(&pending_absent,0);atomic_store(&drafts_idle_marked,false);}
     char key[256];
     if(!data || !unit || unit>UINT32_MAX || count>UINT32_MAX || count>SIZE_MAX/unit ||
        !make_key(key,sizeof(key),scope_app,scope_owner,name)) return ESP_ERR_INVALID_ARG;
@@ -643,15 +644,64 @@ esp_err_t feishu_cache_pending_read(unsigned slot,feishu_outbox_t *p)
     esp_err_t err=read_impl(name,p,sizeof(*p),1,&count,NULL);
     if(err==ESP_OK && (count!=1 || !feishu_outbox_valid(p)))err=ESP_ERR_INVALID_RESPONSE;
     if(err==ESP_OK && p->state==FEISHU_OUTBOX_EMPTY)err=ESP_ERR_NOT_FOUND;
+    if(err==ESP_OK){
+        feishu_data_object_t body={0};int exists=text_stat(p->body_name,p->object_id,&body);
+        if(exists==FEISHU_DATA_NOTFOUND)err=ESP_ERR_NOT_FOUND; /* Idle draft was reclaimed. */
+        else if(exists!=FEISHU_DATA_OK)err=data_result(exists);
+    }
     if(err==ESP_ERR_NOT_FOUND)atomic_fetch_or(&pending_absent,1u<<slot);
     /* Preserve readable send metadata even if its body is damaged. The UI can
      * show recovery/cancel choices instead of silently losing a pending send. */
     UNLOCK();return err;
 }
+void feishu_cache_drafts_idle(void)
+{
+    if(!mutex || atomic_load(&drafts_idle_marked))return;
+    LOCK();bool complete=true;
+    for(unsigned i=0;i<FEISHU_OUTBOX_SLOTS;++i){
+        feishu_outbox_t p;esp_err_t found=feishu_cache_pending_read(i,&p);
+        if(found==ESP_ERR_NOT_FOUND)continue;
+        if(found!=ESP_OK){complete=false;continue;}
+        feishu_data_object_t body={0};int rc=text_stat(p.body_name,p.object_id,&body);
+        if(rc==FEISHU_DATA_OK && body.protected_data)rc=feishu_data_set_protected(&store,p.object_id,false);
+        if(rc!=FEISHU_DATA_OK)complete=false;
+    }
+    if(complete)atomic_store(&drafts_idle_marked,true);
+    UNLOCK();
+}
+esp_err_t feishu_cache_draft_slot(int *slot)
+{
+    if(!slot)return ESP_ERR_INVALID_ARG;
+    *slot=-1;int vacant=-1;esp_err_t error=ESP_ERR_NOT_FOUND;
+    for(unsigned i=0;i<FEISHU_OUTBOX_SLOTS;++i){
+        feishu_outbox_t p;esp_err_t found=feishu_cache_pending_read(i,&p);
+        if(found==ESP_OK){*slot=(int)i;return ESP_OK;}
+        if(found==ESP_ERR_NOT_FOUND && vacant<0)vacant=(int)i;
+        else if(found!=ESP_OK && found!=ESP_ERR_NOT_FOUND)error=found;
+    }
+    if(vacant>=0){*slot=vacant;return ESP_OK;}
+    return error;
+}
+esp_err_t feishu_cache_prune_drafts(int keep,bool include_uncertain)
+{
+    if(keep < -1 || keep>=FEISHU_OUTBOX_SLOTS)return ESP_ERR_INVALID_ARG;
+    esp_err_t result=ESP_OK;
+    for(unsigned i=0;i<FEISHU_OUTBOX_SLOTS;++i){
+        if((int)i==keep)continue;
+        feishu_outbox_t p;esp_err_t err=feishu_cache_pending_read(i,&p);
+        if(err==ESP_ERR_NOT_FOUND)continue;
+        if(err==ESP_OK && (include_uncertain || p.state==FEISHU_OUTBOX_READY)){
+            p.state=FEISHU_OUTBOX_EMPTY;err=feishu_cache_pending_write(i,&p,NULL);
+        }
+        if(err!=ESP_OK && result==ESP_OK)result=err;
+    }
+    return result;
+}
 esp_err_t feishu_cache_pending_write(unsigned slot,const feishu_outbox_t *p,feishu_data_writer_t *body)
 {
     if(!mutex || !feishu_outbox_valid(p) || slot>=FEISHU_OUTBOX_SLOTS ||
        (body && (p->object_id!=body->id || p->length!=body->raw || p->state==FEISHU_OUTBOX_EMPTY)))return ESP_ERR_INVALID_ARG;
+    atomic_store(&drafts_idle_marked,false);
     atomic_fetch_and(&pending_absent,~(1u<<slot));
     LOCK();int rc=FEISHU_DATA_MISUSE;
     char name[32],meta_key[256],body_name[96],body_key[256];

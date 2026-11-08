@@ -9,6 +9,9 @@ typedef struct {uint64_t generation;uint32_t length,crc;int status;} record_t;
 static struct {bool active;unsigned key,slot;uint64_t generation;} writing;
 static struct {uint64_t epoch;unsigned key,slot;record_t records[2];bool valid;} proofs[4];
 static unsigned next_proof;
+#ifdef FEISHU_ASSISTANT_AUTOTEST
+void feishu_root_flashdb_probe_cold(void) {memset(proofs,0,sizeof(proofs));next_proof=0;}
+#endif
 static bool garbage_clean;
 static uint64_t garbage_root_epoch;
 static uint32_t get32(const uint8_t *p)
@@ -52,6 +55,13 @@ static int chunk(unsigned key,unsigned slot,record_t r,unsigned seq,uint8_t *byt
 static record_t inspect(unsigned key,unsigned slot)
 {
     record_t r=header(key,slot);if(r.status)return r;
+    unsigned chunks=(r.length+511u)/512u;
+    if(chunks>=3){
+        char prefix[24],first[48],last[48];
+        snprintf(prefix,sizeof(prefix),"r%02x%c/%016llx/",key,slot?'b':'a',(unsigned long long)r.generation);
+        chunk_name(first,key,slot,r.generation,0);chunk_name(last,key,slot,r.generation,chunks-1);
+        r.status=mapped(feishu_fdb_prefetch(prefix,first,last,chunks));if(r.status)return r;
+    }
     uint32_t crc=UINT32_MAX;uint8_t bytes[512];
     for(unsigned seq=0;seq*512u<r.length;++seq) {
         size_t n=0;r.status=chunk(key,slot,r,seq,bytes,&n);if(r.status)break;

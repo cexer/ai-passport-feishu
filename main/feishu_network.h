@@ -19,3 +19,6 @@ void feishu_network_stop(void);
 bool feishu_network_connected(void);
 bool feishu_network_user_offline(void);
 esp_err_t feishu_network_disconnect(void);
+
+/* NULL when connected; otherwise a credential-free user-facing reason. */
+const char *feishu_network_failure_hint(void);

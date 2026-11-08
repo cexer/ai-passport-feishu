@@ -2,6 +2,8 @@
 
 #include "esp_err.h"
 #include "feishu_model.h"
+#include "feishu_feedback.h"
+#include "feishu_power_policy.h"
 
 #include <stddef.h>
 
@@ -66,3 +68,13 @@ esp_err_t feishu_store_request_auth(unsigned request);
 #define FEISHU_XIAOZHI_CONFIG_MAX 1536
 esp_err_t feishu_store_load_xiaozhi(char *json,size_t capacity);
 esp_err_t feishu_store_save_xiaozhi(const char *json);
+
+typedef struct { bool boot; unsigned silence_seconds; unsigned volume; unsigned timeout_minutes; } feishu_assistant_settings_t;
+/* silence_seconds: 0 = physical OK, otherwise 2..5 seconds after speech. */
+esp_err_t feishu_store_load_assistant(feishu_assistant_settings_t *settings);
+esp_err_t feishu_store_save_assistant(const feishu_assistant_settings_t *settings);
+esp_err_t feishu_store_load_sounds(feishu_sound_settings_t *settings);
+esp_err_t feishu_store_save_sounds(const feishu_sound_settings_t *settings);
+
+esp_err_t feishu_store_load_power(feishu_power_settings_t *settings);
+esp_err_t feishu_store_save_power(const feishu_power_settings_t *settings);

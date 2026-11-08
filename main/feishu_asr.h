@@ -1,4 +1,5 @@
 #pragma once
+#include "feishu_feedback.h"
 
 #include "esp_err.h"
 #include "feishu_api.h"
@@ -33,7 +34,9 @@ void feishu_asr_set_resource_hooks(esp_err_t (*acquire)(void),void (*release)(vo
 esp_err_t feishu_asr_prepare(bool enable);
 void feishu_asr_prepare_cancel(void);
 bool feishu_asr_prepare_ready(void);
+bool feishu_asr_prepare_expired(void);
 
+#define FEISHU_ERR_AUDIO_BACKPRESSURE ((esp_err_t)0x7f1c)
 #define FEISHU_ERR_XIAO_PAIRING ((esp_err_t)0x7f17)
 typedef struct {
     bool supported,paired;
@@ -49,3 +52,6 @@ void feishu_asr_pairing_snapshot(feishu_asr_pairing_t *info);
 esp_err_t feishu_asr_mcp_probe(feishu_api_session_t *session,const char *chat,
     const feishu_mcp_status_t *snapshot);
 #endif
+
+/* Worker/audio-owner only. Never opens/closes the live assistant's codec. */
+esp_err_t feishu_asr_feedback(feishu_sound_t kind,bool live_owner,bool keep_warm);

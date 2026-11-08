@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { ROOT_MIGRATION,ROOT_CREDENTIALS,ROOT_ACCESS,ROOT_OWNER,ROOT_SEEN,ROOT_WIFI_SETUP,ROOT_WIFI,ROOT_AUTH_REQUEST,ROOT_VOICE,ROOT_XIAOZHI,ROOT_WIFI_BOOK };
+enum { ROOT_MIGRATION,ROOT_CREDENTIALS,ROOT_ACCESS,ROOT_OWNER,ROOT_SEEN,ROOT_WIFI_SETUP,ROOT_WIFI,ROOT_AUTH_REQUEST,ROOT_VOICE,ROOT_XIAOZHI,ROOT_WIFI_BOOK,ROOT_ASSISTANT,ROOT_SOUNDS,ROOT_POWER };
 typedef struct {
     uint32_t version,reserved;
     uint64_t epoch;
@@ -398,4 +398,67 @@ esp_err_t feishu_store_save_xiaozhi(const char *json)
     if(!json || !*json || strlen(json)>=FEISHU_XIAOZHI_CONFIG_MAX)return ESP_ERR_INVALID_ARG;
     esp_err_t err=begin();if(err!=ESP_OK)return err;
     return end(save_value(ROOT_XIAOZHI,json,strlen(json)+1));
+}
+
+esp_err_t feishu_store_load_assistant(feishu_assistant_settings_t *s)
+{
+    if(!s)return ESP_ERR_INVALID_ARG;
+    *s=(feishu_assistant_settings_t){false,2,60,10};
+    esp_err_t err=begin();if(err!=ESP_OK)return err;
+    uint8_t record[4]={0};size_t total=0;
+    err=read_part(ROOT_ASSISTANT,0,NULL,0,&total);
+    if(absent(err))return end(ESP_OK);
+    if(err==ESP_OK && total!=sizeof(record))err=FEISHU_STORE_ERR_CORRUPT;
+    if(err==ESP_OK)err=read_part(ROOT_ASSISTANT,0,record,sizeof(record),&total);
+    if(err==ESP_OK && ((record[0]<1 || record[0]>3) || (record[0]<3 ? record[1]>1:(record[1]>>1)>60) || (record[0]==1 ? record[3]!=0:record[3]>100) ||
+       (record[2]!=0 && (record[2]<2 || record[2]>5))))err=FEISHU_STORE_ERR_CORRUPT;
+    if(err==ESP_OK)*s=(feishu_assistant_settings_t){(record[1]&1)!=0,record[2],record[0]==1 ? 60:record[3],record[0]==3 ? record[1]>>1:10};
+    return end(err);
+}
+esp_err_t feishu_store_save_assistant(const feishu_assistant_settings_t *s)
+{
+    if(!s || s->volume>100 || s->timeout_minutes>60 || (s->silence_seconds!=0 && (s->silence_seconds<2 || s->silence_seconds>5)))return ESP_ERR_INVALID_ARG;
+    esp_err_t err=begin();if(err!=ESP_OK)return err;
+    const uint8_t record[4]={3,(uint8_t)((s->boot ? 1:0)|(s->timeout_minutes<<1)),(uint8_t)s->silence_seconds,(uint8_t)s->volume};
+    return end(save_value(ROOT_ASSISTANT,record,sizeof(record)));
+}
+
+esp_err_t feishu_store_load_sounds(feishu_sound_settings_t *s)
+{
+    if(!s)return ESP_ERR_INVALID_ARG;
+    *s=(feishu_sound_settings_t){true,true,true};
+    esp_err_t err=begin();if(err!=ESP_OK)return err;
+    uint8_t record[2]={0};size_t total=0;
+    err=read_part(ROOT_SOUNDS,0,NULL,0,&total);
+    if(absent(err))return end(ESP_OK);
+    if(err==ESP_OK && total!=sizeof(record))err=FEISHU_STORE_ERR_CORRUPT;
+    if(err==ESP_OK)err=read_part(ROOT_SOUNDS,0,record,sizeof(record),&total);
+    if(err==ESP_OK && (record[0]!=1 || record[1]>7))err=FEISHU_STORE_ERR_CORRUPT;
+    if(err==ESP_OK)*s=(feishu_sound_settings_t){(record[1]&1)!=0,(record[1]&2)!=0,(record[1]&4)!=0};
+    return end(err);
+}
+esp_err_t feishu_store_save_sounds(const feishu_sound_settings_t *s)
+{
+    if(!s)return ESP_ERR_INVALID_ARG;
+    esp_err_t err=begin();if(err!=ESP_OK)return err;
+    const uint8_t record[2]={1,(s->success ? 1:0)|(s->failure ? 2:0)|(s->key ? 4:0)};
+    return end(save_value(ROOT_SOUNDS,record,sizeof(record)));
+}
+
+esp_err_t feishu_store_load_power(feishu_power_settings_t *s)
+{
+ if(!s){return ESP_ERR_INVALID_ARG;}
+ *s=feishu_power_defaults();esp_err_t e=begin();if(e!=ESP_OK)return e;
+ uint8_t b[5];size_t total=0;e=read_part(ROOT_POWER,0,NULL,0,&total);
+ if(absent(e))return end(ESP_OK);
+ if(e==ESP_OK && total!=sizeof(b))e=FEISHU_STORE_ERR_CORRUPT;
+ if(e==ESP_OK)e=read_part(ROOT_POWER,0,b,sizeof(b),&total);
+ if(e==ESP_OK && !feishu_power_decode(b,total,s))e=FEISHU_STORE_ERR_CORRUPT;
+ return end(e);
+}
+esp_err_t feishu_store_save_power(const feishu_power_settings_t *s)
+{
+ if(!feishu_power_valid(s)){return ESP_ERR_INVALID_ARG;}
+ esp_err_t e=begin();if(e!=ESP_OK)return e;
+ const uint8_t b[5]={1,s->screen_minutes,s->cpu,s->refresh,s->wifi};return end(save_value(ROOT_POWER,b,sizeof(b)));
 }

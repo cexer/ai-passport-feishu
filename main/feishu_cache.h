@@ -71,3 +71,12 @@ esp_err_t feishu_cache_blob_commit(feishu_data_writer_t *first,const char *name,
 
 /* Lock-free: true only when all four slots were verified empty for this scope. */
 bool feishu_cache_pending_empty(void);
+/* One global draft: a new composition replaces the previous record, including
+ * an abandoned failed send. Caller runs on the serialized worker, never in POST. */
+esp_err_t feishu_cache_draft_slot(int *slot);
+/* keep=-1 clears eligible records. include_uncertain requires an explicit
+ * user clear operation; ordinary replacement prunes only READY drafts. */
+esp_err_t feishu_cache_prune_drafts(int keep,bool include_uncertain);
+/* Idle payloads become ordinary eviction candidates. Existing reader leases
+ * still protect an open review/upload. Never called from button callbacks. */
+void feishu_cache_drafts_idle(void);

@@ -1,0 +1,115 @@
+diff --git a/components/feishu_flashdb/feishu_fdb.c b/components/feishu_flashdb/feishu_fdb.c
+index 726d989..1a8875c 100644
+--- a/components/feishu_flashdb/feishu_fdb.c
++++ b/components/feishu_flashdb/feishu_fdb.c
+@@ -5,6 +5,9 @@
+ #include <stdlib.h>
+ #include <string.h>
+ 
++static void (*cooperate_callback)(void);
++void feishu_fdb_set_cooperate(void (*callback)(void)) {cooperate_callback=callback;}
++void feishu_fdb_cooperate(void) {if(cooperate_callback)cooperate_callback();}
+ static struct fdb_kvdb database;
+ static feishu_fdb_io_t media;
+ static bool claimed, opened, failed;
+diff --git a/components/feishu_flashdb/include/feishu_fdb.h b/components/feishu_flashdb/include/feishu_fdb.h
+index d4374c6..a77a9d6 100644
+--- a/components/feishu_flashdb/include/feishu_fdb.h
++++ b/components/feishu_flashdb/include/feishu_fdb.h
+@@ -23,6 +23,10 @@ enum {
+  * recognized raw DB may complete a canonical EMPTY header only after proving
+  * its entire sector payload is erased, as required after interrupted GC.
+  * An IO failure latches until close/reopen; no further raw mutations occur. */
++/* Register before engine use. Called on logical reads including RAM cache hits.
++ * Callback may yield the scheduler only; it must never re-enter/mutate the DB. */
++void feishu_fdb_set_cooperate(void (*callback)(void));
++void feishu_fdb_cooperate(void);
+ int feishu_fdb_open(const feishu_fdb_io_t *io, bool allow_blank);
+ void feishu_fdb_close(void);
+ int feishu_fdb_status(void);
+diff --git a/components/feishu_flashdb/provenance.json b/components/feishu_flashdb/provenance.json
+index f9186b7..e4beee1 100644
+--- a/components/feishu_flashdb/provenance.json
++++ b/components/feishu_flashdb/provenance.json
+@@ -27,19 +27,20 @@
+     "Transient selected-record locator hints are CRC/status/exact-name revalidated before deletion",
+     "Root-only mutation epoch avoids repeating proven-empty root garbage scans during object writes",
+     "Conservative usage recount occurs only when an untracked overwrite may overcount",
+-    "Read-only grouped chunk locator warmup reuses the bounded key cache; normal reads revalidate status, CRC and full key"
++    "Read-only grouped chunk locator warmup reuses the bounded key cache; normal reads revalidate status, CRC and full key",
++    "Cooperative scheduler callback before every logical read, including RAM-window hits; firmware yields after a four-millisecond CPU budget"
+   ],
+   "current_source_sha256": {
+     "vendor\\fal.h": "cdfc0e3b90656ac45d428e369397fed15347e9ea44f19213343ca7f1790a44b7",
+     "vendor\\fal_cfg.h": "257c61045f83914e6771b47ddce9dacfecae66b8377bf382f2392cec4b8df205",
+     "vendor\\fal_def.h": "4fa6835cd80aab2fd59ab801c665ce3e208c5e532dbc1d778f363c6b404ae97f",
+     "vendor\\fdb.c": "9e860cd2fbfdcbc635af5083de4284a89701d4ef683effc96d04a6c63c74f3ce",
+-    "vendor\\fdb_cfg.h": "bc562ec982c5330dba85c738e9692ec384b03f69c4bed754d522246bbd1194c9",
++    "vendor\\fdb_cfg.h": "6c47e4c06b2da98d2f4b0850aaebdfae40fe3f62bf6875bdba944fb441567462",
+     "vendor\\fdb_def.h": "0db52289b8d7c76940684a05c086d306a6fad280848c445baf3940187e8dc362",
+     "vendor\\fdb_kvdb.c": "f35c96cca771e135be921a7823c761537d61e1569385b587d9efa6151574b588",
+     "vendor\\fdb_low_lvl.h": "e8a240bbd051e2254520bcbe30ee0beab2a6e774f7f5c0d036675b422ba345bc",
+     "vendor\\fdb_read_cache.c": "55acececb8bfdd01a02d7652c0dbdd1c34ef92ac16267ed51b2eeece91e532aa",
+-    "vendor\\fdb_utils.c": "27e90c3aa7157b7f6bc392fc026951f84b1d1444e6ef59a88143cec122b24088",
++    "vendor\\fdb_utils.c": "36b7f8dc9fe4d85fd97ffeb1d837bec13c45c9b88f19fa0bca93f4f161a2956a",
+     "vendor\\flashdb.h": "836e380631dad32abf7e9b56aa69696c7719e21387610e6ddcb3f2b14f8dae33"
+   }
+ }
+diff --git a/components/feishu_flashdb/vendor/fdb_cfg.h b/components/feishu_flashdb/vendor/fdb_cfg.h
+index 1548c5a..53ba137 100644
+--- a/components/feishu_flashdb/vendor/fdb_cfg.h
++++ b/components/feishu_flashdb/vendor/fdb_cfg.h
+@@ -1,17 +1,20 @@
+-#ifndef FEISHU_FDB_CFG_H
+-#define FEISHU_FDB_CFG_H
+-#define FDB_USING_KVDB
+-#define FDB_USING_FAL_MODE
+-#define FDB_USING_NATIVE_ASSERT
+-#define FDB_WRITE_GRAN 8
+-#define FDB_KV_CACHE_TABLE_SIZE 128
+-#define FDB_SECTOR_CACHE_TABLE_SIZE 4
+-#define FDB_USING_READ_CACHE 1
+-#define FDB_READ_CACHE_WINDOW 1024
+-/* Host/reference default; firmware enables the fixed filter through CMake. */
+-#ifndef FDB_USING_NAME_FILTER
+-#define FDB_USING_NAME_FILTER 0
+-#endif
+-/* Never log keys, which may contain user metadata. */
+-#define FDB_PRINT(...) ((void)0)
+-#endif
++#ifndef FEISHU_FDB_CFG_H
++#define FEISHU_FDB_CFG_H
++#define FDB_USING_KVDB
++#define FDB_USING_FAL_MODE
++#define FDB_USING_NATIVE_ASSERT
++#define FDB_WRITE_GRAN 8
++#define FDB_KV_CACHE_TABLE_SIZE 128
++#define FDB_SECTOR_CACHE_TABLE_SIZE 4
++#define FDB_USING_READ_CACHE 1
++#define FDB_READ_CACHE_WINDOW 1024
++/* Host/reference default; firmware enables the fixed filter through CMake. */
++#ifndef FDB_USING_NAME_FILTER
++#define FDB_USING_NAME_FILTER 0
++#endif
++/* Never log keys, which may contain user metadata. */
++/* Cooperative scheduling belongs above the optional read cache. */
++void feishu_fdb_cooperate(void);
++#define FDB_COOPERATE() feishu_fdb_cooperate()
++#define FDB_PRINT(...) ((void)0)
++#endif
+diff --git a/components/feishu_flashdb/vendor/fdb_utils.c b/components/feishu_flashdb/vendor/fdb_utils.c
+index c8a44cb..98b8ab5 100644
+--- a/components/feishu_flashdb/vendor/fdb_utils.c
++++ b/components/feishu_flashdb/vendor/fdb_utils.c
+@@ -260,6 +260,11 @@ fdb_err_t _fdb_flash_read(fdb_db_t db, uint32_t addr, void *buf, size_t size)
+ 
+     if (db->io_failed) { memset(buf,0,size); return FDB_READ_ERR; }
+ 
++    /* Cached scans may perform thousands of logical reads without entering
++     * the physical port. Preserve scheduler progress on both cache paths. */
++#ifdef FDB_COOPERATE
++    FDB_COOPERATE();
++#endif
+     /* the read cache is above the storage layer, so it covers every backend */
+ #if FDB_USING_READ_CACHE
+     if (_fdb_read_cache_read(db, addr, buf, size)) {

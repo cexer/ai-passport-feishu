@@ -17,10 +17,15 @@ lv_display_t *bsp_lvgl_init(void) {
     }
 
     lvgl_port_cfg_t pc = ESP_LVGL_PORT_INIT_CONFIG();
-    // TJPGD keeps a 4 KiB work pool on the LVGL task stack while probing and
-    // decoding JPEG files. The port default (7168) overflows on real Feishu
-    // images, so reserve enough headroom for the decoder and filesystem calls.
+    /* Business rendering runs at 100ms; a 5ms GUI tick needlessly wakes idle
+     * power management. 20ms retains the input dispatch/animation cadence. */
+    pc.timer_period_ms = 20;
+    // Built-in TJPGD probes use a 4 KiB local work pool. Keep the larger
+    // stack only when that decoder is enabled. The Feishu profile disables
+    // it and uses a heap-backed worker decoder plus a small UI pixel stream.
+#if LV_USE_TJPGD
     pc.task_stack = 12288;
+#endif
     if (lvgl_port_init(&pc) != ESP_OK) {
         ESP_LOGE(TAG, "lvgl_port_init 失败");
         return NULL;
@@ -29,9 +34,7 @@ lv_display_t *bsp_lvgl_init(void) {
     const lvgl_port_display_cfg_t dc = {
         .panel_handle = bsp_display_panel(),
         .io_handle    = bsp_display_io(),
-        // ⚠ C3 无 PSRAM,DMA 只能用内部 RAM(总共约 150KB)。
-        // 20 行单缓冲 ≈ 9.6KB;若改成 40 行双缓冲(≈37.5KB)会把 I2S 等外设的
-        // DMA 描述符挤到 NO_MEM。刷新略慢但稳。
+        // Keep the qualified single 20-row buffer (9.6 KiB RGB565).
         .buffer_size   = (uint32_t)BSP_LCD_W * 20,
         .double_buffer = false,
         .hres = BSP_LCD_W, .vres = BSP_LCD_H,

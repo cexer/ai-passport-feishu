@@ -13,5 +13,8 @@
 #define FDB_USING_NAME_FILTER 0
 #endif
 /* Never log keys, which may contain user metadata. */
+/* Cooperative scheduling belongs above the optional read cache. */
+void feishu_fdb_cooperate(void);
+#define FDB_COOPERATE() feishu_fdb_cooperate()
 #define FDB_PRINT(...) ((void)0)
 #endif

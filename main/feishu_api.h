@@ -7,11 +7,13 @@
 #include "feishu_outbox.h"
 #include "feishu_data.h"
 #include "feishu_image.h"
+#include "feishu_outgoing_mentions.h"
 
 #include <stddef.h>
 #include <stdint.h>
 
 #define FEISHU_TENANT_TOKEN_MAX 2048
+
 
 // Distinct from malformed JSON, missing permissions and transport failures.
 #define FEISHU_ERR_AUTH_REVOKED ((esp_err_t)0x7f01)
@@ -28,6 +30,10 @@ typedef struct {
     char app_id[FEISHU_APP_ID_MAX];
     char app_secret[FEISHU_APP_SECRET_MAX];
     char self_open_id[FEISHU_CHAT_ID_MAX];
+    char last_sent_id[FEISHU_MESSAGE_ID_MAX]; /* Only a server-acknowledged ID. */
+    char last_sent_preview[FEISHU_TEXT_MAX];
+    uint64_t last_sent_length;
+    bool defer_list_bodies; /* Active assistant: cache list previews, fetch body on open. */
 } feishu_api_session_t;
 
 esp_err_t feishu_api_authenticate(feishu_api_session_t *session,
@@ -43,6 +49,13 @@ esp_err_t feishu_api_list_messages(feishu_api_session_t *session,
                                    size_t capacity, size_t *count);
 esp_err_t feishu_api_message_page(feishu_api_session_t *session,const char *chat_id,const char *token,
                                    feishu_message_t *messages,size_t capacity,feishu_page_cursor_t *page);
+/* Paged UI previews: no synchronous body compression/Flash commits. */
+esp_err_t feishu_api_message_preview_page(feishu_api_session_t *session,const char *chat_id,const char *token,
+                                   feishu_message_t *messages,size_t capacity,feishu_page_cursor_t *page);
+/* Ephemeral latest-message preview for an assistant turn. No text cache writes,
+ * compression, or pagination workspace; raw mention keys may remain. */
+esp_err_t feishu_api_message_preview(feishu_api_session_t *session,const char *chat_id,
+                                   feishu_message_t *message,bool *present);
 esp_err_t feishu_api_get_message(feishu_api_session_t *session,const char *message_id,
                                   feishu_message_t *message);
 /* UI-safe cooperative priority change; never closes a worker-owned socket. */
@@ -79,3 +92,8 @@ esp_err_t feishu_api_internal_asr_packet(const char *cookie,const char *source,c
     uint32_t sequence,unsigned action,const int16_t *pcm,size_t samples,
     char *recognition,size_t recognition_size,uint64_t *last_length,
     feishu_data_writer_t *final_draft,const volatile bool *cancel_requested,const volatile esp_err_t *capture_error);
+
+/* Resolve through this owner's app-scoped OAuth identity; never copy open IDs
+ * from another bot/CLI application. Fails closed on incomplete/ambiguous lists. */
+esp_err_t feishu_api_resolve_mention(feishu_api_session_t *session,const char *chat,
+    const char *name,feishu_mention_t *result,const volatile bool *cancel);

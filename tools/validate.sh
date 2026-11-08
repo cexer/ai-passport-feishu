@@ -86,6 +86,9 @@ run_static_checks() {
     "${CC:-cc}" "${fdb_flags[@]}" tests/test_feishu_root_flashdb.c \
         main/feishu_root_flashdb.c "${fdb_root_sources[@]}" -o "${fdb_test_dir}/root"
     "${fdb_test_dir}/root"
+    "${CC:-cc}" "${fdb_flags[@]}" tests/test_feishu_root_prefetch.c \
+        main/feishu_root_flashdb.c "${fdb_root_sources[@]}" -o "${fdb_test_dir}/root_prefetch"
+    "${fdb_test_dir}/root_prefetch"
     "${CC:-cc}" "${fdb_flags[@]}" -Itests/feishu_host -Dmain=store_contract_main \
         -c tests/test_feishu_store.c -o "${fdb_test_dir}/store_contract.o"
     "${CC:-cc}" "${fdb_flags[@]}" tests/run_feishu_store_flashdb.c main/feishu_model.c \
@@ -143,6 +146,44 @@ run_static_checks() {
         tests/test_feishu_model.c main/feishu_model.c \
         -o "${test_dir}/test_feishu_model"
     "${test_dir}/test_feishu_model"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain tests/test_feishu_live_receive.c main/feishu_model.c \
+        -o "${test_dir}/test_feishu_live_receive"
+    "${test_dir}/test_feishu_live_receive"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain tests/test_feishu_lazy_body.c main/feishu_model.c \
+        -o "${test_dir}/test_feishu_lazy_body"
+    "${test_dir}/test_feishu_lazy_body"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain tests/test_feishu_network_error.c \
+        -o "${test_dir}/test_feishu_network_error"
+    "${test_dir}/test_feishu_network_error"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain tests/test_feishu_wifi_retry.c \
+        -o "${test_dir}/test_feishu_wifi_retry"
+    "${test_dir}/test_feishu_wifi_retry"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain tests/test_feishu_about.c main/feishu_model.c \
+        -o "${test_dir}/test_feishu_about"
+    "${test_dir}/test_feishu_about"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain tests/test_feishu_power_policy.c \
+        -o "${test_dir}/test_feishu_power_policy"
+    "${test_dir}/test_feishu_power_policy"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Itests/power_host -Imain \
+        tests/test_feishu_power_runtime.c main/feishu_power.c -o "${test_dir}/test_feishu_power_runtime"
+    "${test_dir}/test_feishu_power_runtime"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain tests/test_feishu_boot_policy.c \
+        -o "${test_dir}/test_feishu_boot_policy"
+    "${test_dir}/test_feishu_boot_policy"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain tests/test_feishu_assistant_policy.c \
+        -o "${test_dir}/test_feishu_assistant_policy"
+    "${test_dir}/test_feishu_assistant_policy"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain tests/test_feishu_compose.c main/feishu_compose.c \
+        -o "${test_dir}/test_feishu_compose"
+    "${test_dir}/test_feishu_compose"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain tests/test_feishu_feedback.c main/feishu_feedback.c \
+        -o "${test_dir}/test_feishu_feedback"
+    "${test_dir}/test_feishu_feedback"
+    python3 tools/generate_feishu_feedback.py --check
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -D_CRT_SECURE_NO_WARNINGS -Imain -Icomponents/jsonsl \
+        tests/test_feishu_outgoing_mentions.c main/feishu_outgoing_mentions.c main/feishu_json.c components/jsonsl/jsonsl.c \
+        -o "${test_dir}/test_feishu_outgoing_mentions"
+    "${test_dir}/test_feishu_outgoing_mentions"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
         tests/test_feishu_internal_asr_protocol.c main/feishu_internal_asr_protocol.c \
         -o "${test_dir}/test_feishu_internal_asr_protocol"
@@ -167,6 +208,13 @@ run_static_checks() {
         tests/test_feishu_auth_policy.c main/feishu_auth_policy.c \
         -o "${test_dir}/test_feishu_auth_policy"
     "${test_dir}/test_feishu_auth_policy"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -DJSONSL_NO_JPR -DJSONSL_STATE_GENERIC \
+        -Imain -Icomponents/jsonsl tests/test_feishu_api_error.c main/feishu_auth_policy.c \
+        main/feishu_json.c components/jsonsl/jsonsl.c -o "${test_dir}/test_feishu_api_error"
+    "${test_dir}/test_feishu_api_error"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Itools/patches/include \
+        tests/test_feishu_tls_poll.c -o "${test_dir}/test_feishu_tls_poll"
+    "${test_dir}/test_feishu_tls_poll"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -DJSONSL_NO_JPR -DJSONSL_STATE_GENERIC \
         -Imain -Icomponents/jsonsl tests/test_feishu_registration_protocol.c \
         main/feishu_registration_protocol.c main/feishu_json.c components/jsonsl/jsonsl.c \
@@ -266,6 +314,10 @@ run_static_checks() {
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -D_CRT_SECURE_NO_WARNINGS -Imain \
         tests/test_feishu_outbox.c main/feishu_outbox.c -o "${test_dir}/test_feishu_outbox"
     "${test_dir}/test_feishu_outbox"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain tests/test_feishu_http_poll.c -o "${test_dir}/test_feishu_http_poll"
+    "${test_dir}/test_feishu_http_poll"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Icomponents/esp_http_client/lib/include tests/test_feishu_http_tx_lifetime.c -o "${test_dir}/test_feishu_http_tx_lifetime"
+    "${test_dir}/test_feishu_http_tx_lifetime"
     mkdir "${test_dir}/jpeg"
     "${CC:-cc}" -Os -std=c11 -Wall -Wextra -Werror -D_CRT_SECURE_NO_WARNINGS \
         -Djd_prepare=feishu_jd_prepare -Djd_decomp=feishu_jd_decomp -Icomponents/feishu_jpeg \
@@ -289,7 +341,13 @@ run_static_checks() {
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain tests/test_feishu_xiaozhi_audio.c \
         main/feishu_xiaozhi_audio.c main/feishu_adpcm.c -o "${test_dir}/test_feishu_xiaozhi_audio"
     "${test_dir}/test_feishu_xiaozhi_audio"
-    if [[ "${FEISHU_MCP_DIAGNOSTIC:-0}" == "1" ]]; then
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain tests/test_feishu_xiaozhi_downlink.c \
+        main/feishu_xiaozhi_downlink.c -o "${test_dir}/test_feishu_xiaozhi_downlink"
+    "${test_dir}/test_feishu_xiaozhi_downlink"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Itests/player_host -Imain \
+        tests/test_feishu_xiaozhi_player.c main/feishu_xiaozhi_player.c -o "${test_dir}/test_feishu_xiaozhi_player"
+    "${test_dir}/test_feishu_xiaozhi_player"
+    if [[ -n "${IDF_PATH:-}" ]]; then
         "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -DJSONSL_NO_JPR -DJSONSL_STATE_GENERIC \
             -Imain -Icomponents/jsonsl -I"${IDF_PATH}/components/json/cJSON" \
             tests/test_feishu_mcp.c main/feishu_mcp.c main/feishu_json.c components/jsonsl/jsonsl.c \

@@ -1,4 +1,7 @@
 #include "feishu_network.h"
+#include "feishu_power.h"
+#include "feishu_network_error.h"
+#include "feishu_wifi_retry.h"
 #include "feishu_store.h"
 #include "feishu_wifi_book.h"
 #include "feishu_wifi_keyboard.h"
@@ -25,7 +28,8 @@ _Static_assert(FEISHU_WIFI_SLOTS==FEISHU_WIFI_SAVED_MAX,"Wi-Fi list and storage 
 static void __attribute__((noinline)) log_link(void)
 {
     wifi_ap_record_t ap={0};esp_err_t result=esp_wifi_sta_get_ap_info(&ap);
-    ESP_LOGI(TAG,"NETWORK_LINK result=%d rssi=%d channel=%u power_save=none",result,ap.rssi,(unsigned)ap.primary);
+    wifi_ps_type_t mode=WIFI_PS_NONE;esp_err_t ps=esp_wifi_get_ps(&mode);
+    ESP_LOGI(TAG,"NETWORK_LINK result=%d rssi=%d channel=%u power_save=%d",result,ap.rssi,(unsigned)ap.primary,ps==ESP_OK ? (int)mode:-1);
 }
 
 static EventGroupHandle_t s_events;
@@ -39,6 +43,16 @@ static bool s_wifi_started;
 static atomic_bool s_stopping;
 static atomic_bool s_connected;
 static atomic_bool s_user_offline;
+static atomic_uint s_disconnect_reason;
+/* Radio operations are owned by the business worker. */
+static size_t s_reconnect_cursor=SIZE_MAX;
+const char *feishu_network_failure_hint(void)
+{return feishu_network_error_hint(s_connected,s_user_offline,s_disconnect_reason);}
+_Static_assert(WIFI_REASON_NO_AP_FOUND==201 && WIFI_REASON_AUTH_FAIL==202 &&
+    WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT==15 && WIFI_REASON_HANDSHAKE_TIMEOUT==204 &&
+    WIFI_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY==210 &&
+    WIFI_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD==211 &&
+    WIFI_REASON_NO_AP_FOUND_IN_RSSI_THRESHOLD==212,"Wi-Fi reason mapping changed");
 
 static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
@@ -52,6 +66,7 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         const wifi_event_sta_disconnected_t *event = data;
         ESP_LOGW(TAG, "station disconnected: reason=%u",
                  event == NULL ? 0u : (unsigned)event->reason);
+        s_disconnect_reason=feishu_network_record_reason(s_disconnect_reason,event ? event->reason:0,s_stopping);
         s_connected=false;
         if (s_events != NULL) xEventGroupClearBits(s_events, NETWORK_CONNECTED_BIT);
         if (!s_stopping) esp_wifi_connect();
@@ -65,6 +80,7 @@ static void ip_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     (void)data;
 
     if (id == IP_EVENT_STA_GOT_IP && s_events != NULL && !s_stopping) {
+        s_disconnect_reason=0;
         s_connected=true;
         xEventGroupSetBits(s_events, NETWORK_CONNECTED_BIT);
     }
@@ -86,6 +102,7 @@ static esp_err_t start_config(unsigned timeout_ms,
     s_events = xEventGroupCreate();
     if (s_events == NULL) return ESP_ERR_NO_MEM;
     s_stopping = !join;
+    s_disconnect_reason=0;
     s_connected=false;
     err = demo_radio_nvs_prepare();
     if (err == ESP_OK) err = demo_radio_network_prepare();
@@ -156,7 +173,7 @@ static esp_err_t start_config(unsigned timeout_ms,
     if(cancel && cancel(context)) {err=ESP_ERR_INVALID_STATE;goto fail;}
     // OAuth refresh and ASR upload multi-kilobyte request bodies. Modem sleep
     // can stall a long TLS write on this small device, so favor reliability.
-    err = esp_wifi_set_ps(WIFI_PS_NONE);
+    err = esp_wifi_set_ps(feishu_power_wifi_requested() ? WIFI_PS_MIN_MODEM:WIFI_PS_NONE);
     if (err != ESP_OK) goto fail;
     log_link();
     memset(&saved, 0, sizeof(saved));
@@ -172,7 +189,41 @@ esp_err_t feishu_network_start(unsigned timeout_ms)
 {return feishu_network_start_cancelable(timeout_ms,NULL,NULL);}
 
 esp_err_t feishu_network_start_cancelable(unsigned timeout_ms,feishu_network_cancel_t cancel,void *context)
-{if(s_user_offline)return ESP_ERR_INVALID_STATE;return start_config(timeout_ms,cancel,context,NULL,true);}
+{
+    if(s_user_offline || (cancel && cancel(context)))return ESP_ERR_INVALID_STATE;
+    if(feishu_network_connected()){s_reconnect_cursor=SIZE_MAX;return ESP_OK;}
+    char names[FEISHU_WIFI_SAVED_MAX][33];size_t count=0,active=0;
+    esp_err_t err=feishu_store_list_wifi(names,&count,&active,sizeof(wifi_config_t));
+    memset(names,0,sizeof(names));
+    if(err!=ESP_OK)return err;
+    if(!count)return start_config(timeout_ms,cancel,context,NULL,true); /* Legacy import. */
+    int64_t deadline=esp_timer_get_time()+(int64_t)timeout_ms*1000;
+    size_t index=feishu_wifi_retry_first(active,s_reconnect_cursor,count);
+    err=ESP_ERR_TIMEOUT;
+    for(size_t tried=0;tried<count;++tried,index=(index+1)%count){
+        if(s_user_offline || (cancel && cancel(context)))return ESP_ERR_INVALID_STATE;
+        int64_t left=deadline-esp_timer_get_time();if(left<=0)break;
+        wifi_config_t candidate={0};
+        err=feishu_store_get_wifi(index,&candidate,sizeof(candidate));
+        s_reconnect_cursor=(index+1)%count;
+        if(err!=ESP_OK){memset(&candidate,0,sizeof(candidate));break;}
+        feishu_network_stop();
+        left=deadline-esp_timer_get_time();
+        if(left<=0){memset(&candidate,0,sizeof(candidate));err=ESP_ERR_TIMEOUT;break;}
+        unsigned budget=feishu_wifi_retry_budget((unsigned)(left/1000));
+        ESP_LOGI(TAG,"WIFI_AUTO_ATTEMPT slot=%u count=%u budget_ms=%u",(unsigned)index,(unsigned)count,budget);
+        err=start_config(budget,cancel,context,&candidate,true);
+        if(err==ESP_OK){
+            if(cancel && cancel(context)){memset(&candidate,0,sizeof(candidate));return ESP_ERR_INVALID_STATE;}
+            esp_err_t saved=feishu_store_save_wifi(&candidate,sizeof(candidate));
+            if(saved!=ESP_OK)ESP_LOGW(TAG,"Wi-Fi active choice not saved: %s",esp_err_to_name(saved));
+            memset(&candidate,0,sizeof(candidate));s_reconnect_cursor=SIZE_MAX;return ESP_OK;
+        }
+        memset(&candidate,0,sizeof(candidate));
+        if(err==ESP_ERR_NO_MEM || err==ESP_ERR_INVALID_STATE)break;
+    }
+    return err;
+}
 
 esp_err_t feishu_network_scan(feishu_wifi_ap_t *items,size_t capacity,size_t *count)
 {
@@ -223,7 +274,7 @@ esp_err_t feishu_network_switch(size_t index,const char *ssid,const char *passwo
     s_user_offline=false;
     feishu_network_stop();err=start_config(12000,cancel,context,&candidate,true);
     if(err==ESP_OK && cancel && cancel(context))err=ESP_ERR_INVALID_STATE;
-    if(err==ESP_OK)err=feishu_store_save_wifi(&candidate,sizeof(candidate));
+    if(err==ESP_OK){s_reconnect_cursor=SIZE_MAX;err=feishu_store_save_wifi(&candidate,sizeof(candidate));}
     if(err!=ESP_OK) {
         feishu_network_stop();
         if(was_offline || !had_previous){s_user_offline=true;*restored=start_config(0,NULL,NULL,NULL,false)==ESP_OK;}

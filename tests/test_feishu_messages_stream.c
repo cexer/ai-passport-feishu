@@ -57,6 +57,26 @@ int main(void)
         assert(messages[1].text_length==strlen("中文\n末尾") && messages[1].text_object_id==100);
         assert(storage.commits==1 && !storage.active[0]);
     }
+    /* Assistant previews deliberately have no storage/compression callbacks. */
+    for(size_t chunk=1;chunk<40;++chunk) {
+        feishu_messages_stream_init(&parser,messages,FEISHU_MAX_MESSAGES,"ou_self",NULL,NULL);
+        for(size_t pos=0;pos<sizeof(doc)-1;) {
+            size_t n=sizeof(doc)-1-pos;if(n>chunk)n=chunk;
+            assert(feishu_messages_stream_feed(&parser,doc+pos,n));pos+=n;
+        }
+        size_t preview_count=0;assert(feishu_messages_stream_finish(&parser,&preview_count) && preview_count==2);
+        assert(!strcmp(messages[1].text,"中文\n末尾") && !messages[1].text_object_id && messages[1].text_unavailable);
+    }
+    const char *preview_head="{\"code\":0,\"data\":{\"items\":[{\"message_id\":\"preview\",\"msg_type\":\"text\",\"sender\":{},\"body\":{\"content\":\"{\\\"text\\\":\\\"";
+    const char *preview_tail="\\\"}\"}}]}}";
+    feishu_messages_stream_init(&parser,messages,1,"ou_self",NULL,NULL);
+    assert(feishu_messages_stream_feed(&parser,preview_head,strlen(preview_head)));
+    char repeated[256];memset(repeated,'x',sizeof(repeated));
+    for(unsigned i=0;i<8192;++i)assert(feishu_messages_stream_feed(&parser,repeated,sizeof(repeated)));
+    assert(feishu_messages_stream_feed(&parser,preview_tail,strlen(preview_tail)));
+    size_t preview_count=0;assert(feishu_messages_stream_finish(&parser,&preview_count) && preview_count==1);
+    assert(messages[0].text[0] && strlen(messages[0].text)<FEISHU_TEXT_MAX && messages[0].text_truncated);
+    assert(messages[0].text_length==2097152 && !messages[0].text_object_id);
     memset(&storage,0,sizeof(storage));
     feishu_messages_stream_init(&parser,messages,1,"ou_self",&operations,&storage);
     assert(!feishu_messages_stream_feed(&parser,doc,strlen(doc)));
@@ -93,6 +113,24 @@ int main(void)
         if(!i)assert(fed && finished && count==1 && storage.commits==1 && parser.more && !strcmp(parser.next_page,"cursor+8/="));
         else assert(!finished && !count && !storage.commits && storage.aborts==1);
     }
+    /* Paged previews retain revision and cursor but never commit text. */
+    const char *revisions[]={"\"update_time\":\"12345\"", "\"update_time\":\"0\"",
+        "\"update_time\":\"x\"", "\"update_time\":false",
+        "\"update_time\":\"12345\",\"update_time\":\"12345\""};
+    for(unsigned i=0;i<5;++i){
+        snprintf(envelope,sizeof(envelope),"{\"code\":0,\"data\":{\"items\":[{\"message_id\":\"page\",\"msg_type\":\"text\",\"sender\":{},%s,\"body\":{\"content\":\"{\\\"text\\\":\\\"body\\\"}\"}}],\"has_more\":true,\"page_token\":\"cursor+8/=\"}}",revisions[i]);
+        feishu_messages_stream_init(&parser,messages,FEISHU_MAX_MESSAGES,"ou_self",NULL,NULL);
+        parser.pagination_required=true;
+        assert(feishu_messages_stream_feed(&parser,envelope,strlen(envelope)));
+        assert(feishu_messages_stream_finish(&parser,&count) && count==1);
+        assert(messages[0].update_time_ms==(i==0 ? 12345u:0u));
+        assert(!messages[0].text_object_id && messages[0].text_unavailable && !messages[0].text_needs_mapping);
+        assert(!strcmp(parser.next_page,"cursor+8/=") && parser.more);
+    }
+    const char mention_preview[]="{\"code\":0,\"data\":{\"items\":[{\"message_id\":\"at\",\"msg_type\":\"text\",\"sender\":{},\"body\":{\"content\":\"{\\\"text\\\":\\\"@_user_1 hello\\\"}\"},\"mentions\":[{\"key\":\"@_user_1\",\"name\":\"name\"}]}]}}";
+    feishu_messages_stream_init(&parser,messages,FEISHU_MAX_MESSAGES,"ou_self",NULL,NULL);
+    assert(feishu_messages_stream_feed(&parser,mention_preview,strlen(mention_preview)));
+    assert(feishu_messages_stream_finish(&parser,&count) && count==1 && messages[0].text_needs_mapping);
     /* No large test string is allocated; chunks cross both JSON string layers. */
     const char prefix[]="{\"code\":0,\"data\":{\"items\":[{\"msg_type\":\"text\",\"message_id\":\"long\",\"sender\":{},\"body\":{\"content\":\"{\\\"text\\\":\\\"";
     const char suffix[]="\\\"}\"}}]}}";

@@ -28,9 +28,10 @@ CONFIG_LV_FS_STDIO_PATH="/feishu/"
 CONFIG_LV_FS_STDIO_CACHE_SIZE=0
 CONFIG_LV_USE_TJPGD=n
 CONFIG_LV_BIN_DECODER_RAM_LOAD=n
-# LVGL 内置 malloc 池大小(KB)。它是独立静态区、不与系统堆共享,配大了会白白占用 RAM。
-# 本 demo UI 简单,24KB 足够;若自建复杂界面出现绘制卡死/看门狗,调大此值。
-CONFIG_LV_MEM_SIZE_KILOBYTES=24
+# Share the system heap: the former fixed 24 KiB GUI pool exhausted while
+# system RAM was still available. Do not reserve a second fixed memory pool.
+CONFIG_LV_USE_CLIB_MALLOC=y
+
 
 # --- 系统 ---
 CONFIG_FREERTOS_HZ=1000
@@ -64,8 +65,23 @@ CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=16384
 # can transmit the header as multiple records instead of stalling on EAGAIN.
 CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096
 CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+# Validate the chain normally, then release the peer certificate. Two concurrent
+# verified TLS transports otherwise retain certificate heaps during message reads.
+CONFIG_MBEDTLS_SSL_KEEP_PEER_CERTIFICATE=n
 
 # 4 bpp grayscale Source Han glyphs use the bounded LVGL RLE decoder.
 CONFIG_LV_USE_FONT_COMPRESSED=y
 
 CONFIG_LV_FONT_FMT_TXT_LARGE=y
+
+# Fixed-width ROM font for the ASCII-only startup animation.
+CONFIG_LV_FONT_UNSCII_16=y
+
+# Idle policy releases locks; live audio and active work keep full performance.
+CONFIG_PM_ENABLE=y
+CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
+CONFIG_FREERTOS_IDLE_TIME_BEFORE_SLEEP=3
+
+# ESP32-C3 USB Serial/JTAG cannot survive light sleep. The SDK releases this
+# lock when USB disconnects, preserving battery-only automatic sleep.
+CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION=y

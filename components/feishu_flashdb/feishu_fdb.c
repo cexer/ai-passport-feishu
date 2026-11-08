@@ -5,6 +5,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+static void (*cooperate_callback)(void);
+void feishu_fdb_set_cooperate(void (*callback)(void)) {cooperate_callback=callback;}
+void feishu_fdb_cooperate(void) {if(cooperate_callback)cooperate_callback();}
 static struct fdb_kvdb database;
 static feishu_fdb_io_t media;
 static bool claimed, opened, failed;
@@ -292,5 +295,18 @@ int feishu_fdb_prefetch(const char *prefix,const char *first,const char *last,un
         }
     }
     _fdb_read_cache_release((fdb_db_t)&database);
+    return feishu_fdb_status();
+}
+
+int feishu_fdb_probe_cold(void)
+{
+    int rc=feishu_fdb_status();if(rc)return rc;
+    _fdb_read_cache_release((fdb_db_t)&database);
+#if FDB_KV_CACHE_TABLE_SIZE > 0
+    for(unsigned i=0;i<FDB_KV_CACHE_TABLE_SIZE;++i){
+        database.kv_cache_table[i].addr=FDB_DATA_UNUSED;
+        database.kv_cache_table[i].active=0;
+    }
+#endif
     return feishu_fdb_status();
 }

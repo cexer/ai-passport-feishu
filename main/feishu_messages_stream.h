@@ -38,6 +38,7 @@ typedef struct {
     bool item_invalid,body_seen,body_invalid,have_text,text_started,text_failed;
     bool preview_full,small_overflow,text_ready[FEISHU_MAX_MESSAGES];
     bool mapping_failed,mention_invalid,mentions_seen;
+    bool update_seen,update_invalid;
 } feishu_messages_stream_t;
 
 void feishu_messages_stream_init(feishu_messages_stream_t *stream,feishu_message_t *messages,

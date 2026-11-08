@@ -41,3 +41,5 @@ void demo_blufi_key(bsp_btn_t btn, bsp_btn_ev_t ev);
 void demo_feishu_enter(void); void demo_feishu_exit(void);
 void demo_feishu_key(bsp_btn_t btn, bsp_btn_ev_t ev);
 bool demo_feishu_back(void);
+
+void demo_feishu_power_tick(void);

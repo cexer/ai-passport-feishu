@@ -12,6 +12,7 @@
 #include "lvgl.h"
 #include "ui_pixel.h"
 #include "feishu_theme.h"
+#include "feishu_power.h"
 #include <stdatomic.h>
 
 static const char *TAG = "main";
@@ -41,19 +42,21 @@ static void onboarding_complete(void)
 static void on_key(bsp_btn_t btn, bsp_btn_ev_t ev, void *user)
 {
     (void)user;
-    if(ev!=BSP_BTN_CLICK && ev!=BSP_BTN_LONG && !((btn==BSP_BTN_DOWN || btn==BSP_BTN_UP) && ev==BSP_BTN_DOUBLE))return;
+    if(ev!=BSP_BTN_CLICK && ev!=BSP_BTN_LONG && ev!=BSP_BTN_DOUBLE)return;
     key_event_t key={(uint8_t)btn,(uint8_t)ev};
     if(s_keys && xQueueSend(s_keys,&key,0)!=pdTRUE)atomic_store(&s_key_overflow,true);
 }
 static void dispatch_key(lv_timer_t *timer)
 {
     (void)timer;
+    feishu_power_ui_tick();if(!s_onboarding)demo_feishu_power_tick();
     if(atomic_exchange(&s_key_overflow,false)) {
         /* Overflow must not replay an old confirmation in a later context. */
         xQueueReset(s_keys);ESP_LOGW(TAG,"input queue overflow; pending buttons cleared");return;
     }
     key_event_t key;if(xQueueReceive(s_keys,&key,0)!=pdTRUE)return;
     bsp_btn_t btn=(bsp_btn_t)key.button;bsp_btn_ev_t ev=(bsp_btn_ev_t)key.event;
+    if(feishu_power_key()){xQueueReset(s_keys);return;}
 #ifdef FEISHU_NETWORK_DIAGNOSTIC
     if(!s_onboarding)return;
 #endif
@@ -88,6 +91,7 @@ static void log_font_grayscale(void)
 
 void app_main(void)
 {
+    feishu_power_init();
     ESP_LOGI(TAG, "Feishu terminal starting");
     bsp_i2c_init();
     if (bsp_display_init() != ESP_OK || !bsp_lvgl_init()) {

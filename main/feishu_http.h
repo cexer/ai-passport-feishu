@@ -44,6 +44,12 @@ esp_err_t feishu_http_get_stream(const char *url,const char *bearer_token,size_t
                                   feishu_http_cancel_t cancel,void *cancel_context,
                                   int *status_code,size_t *length);
 
+/* Opt-in API error extraction: parse at most 4 KiB of non-2xx JSON only
+ * for its root numeric code. Never forwards error content to the success sink. */
+esp_err_t feishu_http_get_stream_code(const char *url,const char *token,size_t limit,
+    feishu_http_sink_t sink,void *context,feishu_http_cancel_t cancel,void *cancel_context,
+    int *status_code,size_t *length,int *api_code);
+
 esp_err_t feishu_http_request(esp_http_client_method_t method,
                               const char *url, const char *bearer_token,
                               const char *json_body, size_t response_limit,
@@ -72,3 +78,11 @@ esp_err_t feishu_http_download_file(const char *url, const char *bearer_token,
                                     int *status_code, size_t *length);
 void feishu_http_stream_close(void);
 void feishu_http_response_free(feishu_http_response_t *response);
+
+/* Optional cooperative heartbeat, scoped to the current network worker. */
+typedef bool (*feishu_http_progress_t)(void *context);
+void feishu_http_set_progress(feishu_http_progress_t progress,void *context);
+/* Opt in only while a live microphone queue must preempt a read. Reset when
+ * the owner installs/clears its progress hook. Never enables POST replay. */
+void feishu_http_set_read_preemptible(bool enabled);
+bool feishu_http_progress(void);

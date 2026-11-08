@@ -1,4 +1,7 @@
 #include "product_onboarding.h"
+#include "feishu_boot.h"
+#include "feishu_power.h"
+#include "feishu_startup.h"
 #include "feishu_qr_retry.h"
 
 #include "feishu_binding.h"
@@ -14,6 +17,7 @@
 #include "feishu_theme.h"
 #include "feishu_ui_chrome.h"
 #include "bsp_battery.h"
+#include "feishu_asr.h"
 
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -27,6 +31,7 @@
 
 typedef enum {
     ONBOARD_CONNECTING = 0,
+    ONBOARD_STARTING,
     ONBOARD_WIFI_SETUP,
     ONBOARD_APP_SETUP,
     ONBOARD_BINDING,
@@ -40,10 +45,12 @@ typedef struct {
     setup_portal_info_t portal;
     char qr_data[FEISHU_BIND_URL_MAX];
     char status[128];
+    bool authorization_entry;
     bool closing;
     bool cancel_auth;
     bool worker_finished;
     bool return_to_wifi;
+    volatile bool retry_wifi;
     uint32_t revision;
     int battery_percent;
 } onboarding_state_t;
@@ -63,6 +70,7 @@ static lv_obj_t *s_battery;
 static lv_timer_t *s_timer;
 static product_onboarding_complete_cb_t s_complete;
 static bool s_completion_delivered;
+static bool s_startup_layout;
 static onboarding_page_t s_rendered_page = (onboarding_page_t)-1;
 static uint32_t s_rendered_revision;
 static char s_rendered_qr[FEISHU_BIND_URL_MAX];
@@ -137,7 +145,7 @@ static esp_err_t select_owner_app(feishu_credentials_t *credentials,const char *
             if(usb_started && feishu_provision_credentials_received()) {err=ESP_OK;goto done;}
             continue;
         }
-        update_state(ONBOARD_APP_SETUP,"飞书扫码选择或新建BOT\n长按确定取消",request->verification_url);
+        update_state(ONBOARD_APP_SETUP,"飞书扫码选择或新建BOT",request->verification_url);
         printf("FAP-SETUP/1 APP_AUTH %s\n",request->verification_url);
         int64_t deadline=esp_timer_get_time()+(int64_t)request->expires_in*1000000;
         unsigned interval=request->interval;
@@ -170,6 +178,8 @@ static void worker_task(void *argument)
 {
     (void)argument;
     ESP_LOGI(TAG,"worker started");
+    TickType_t splash_started=xTaskGetTickCount();
+    bool skip_intro=s_state.authorization_entry;
     esp_err_t err;
     feishu_credentials_t *credentials=NULL;
     bool bound=false,force_wifi=false;
@@ -177,8 +187,21 @@ static void worker_task(void *argument)
     unsigned auth_request=FEISHU_AUTH_NONE;
     err=demo_radio_nvs_prepare();
     if(err!=ESP_OK) {update_state(ONBOARD_ERROR,"无法读取配置，未清除已有数据",NULL);goto finished;}
+    feishu_power_settings_t power;esp_err_t power_err=feishu_store_load_power(&power);feishu_power_set_settings(&power);
+    if(power_err!=ESP_OK)ESP_LOGW(TAG,"power settings fallback=%d",power_err);
     err=feishu_store_get_auth_request(&auth_request);
     if(err!=ESP_OK) {update_state(ONBOARD_ERROR,"无法读取授权状态，原配置保留",NULL);goto finished;}
+    if(auth_request!=FEISHU_AUTH_NONE){
+        skip_intro=true;xSemaphoreTake(s_lock,portMAX_DELAY);s_state.authorization_entry=true;xSemaphoreGive(s_lock);
+        update_state(ONBOARD_AUTH_LOADING,"正在准备授权二维码…",NULL);
+    }
+#ifndef FEISHU_VOICE_AUTOTEST
+    feishu_sound_settings_t sounds;
+    if(!skip_intro && feishu_store_load_sounds(&sounds)==ESP_OK && sounds.success)
+        (void)feishu_asr_feedback(FEISHU_SOUND_BOOT,false,false);
+#endif
+    TickType_t splash_elapsed=xTaskGetTickCount()-splash_started;
+    if(!skip_intro && splash_elapsed<pdMS_TO_TICKS(1200))vTaskDelay(pdMS_TO_TICKS(1200)-splash_elapsed);
     force_wifi=feishu_store_wifi_setup_required();
     credentials=calloc(1,sizeof(*credentials));
     if(!credentials) {update_state(ONBOARD_ERROR,"内存不足，请重试",NULL);goto finished;}
@@ -194,14 +217,25 @@ static void worker_task(void *argument)
     }
 network_setup:
     for (;;) {
+        /* Consume an explicit portal request once. Restart must still be able
+         * to reconnect remembered Wi-Fi; authorization is a separate state. */
+        if(force_wifi && feishu_store_require_wifi_setup(false)!=ESP_OK){
+            update_state(ONBOARD_ERROR,"无法读取配网状态，原配置保留",NULL);goto finished;
+        }
         update_state(ONBOARD_CONNECTING, "正在连接 Wi-Fi...\n长按确定返回配网", NULL);
-        err = force_wifi ? ESP_ERR_INVALID_STATE : feishu_network_start_cancelable(12000,auth_cancel,NULL);
+        err = force_wifi ? ESP_ERR_INVALID_STATE : feishu_network_start_cancelable(20000,auth_cancel,NULL);
         ESP_LOGI(TAG,"network result=%s",esp_err_to_name(err));
         if(cancelled())goto cancelled;
-        if (err == ESP_OK) break;
+        if (err == ESP_OK) {
+#ifdef FEISHU_ONBOARDING_AUTOTEST
+            ESP_LOGI(TAG,"ONBOARD_RETRY_DONE pass=1 network=1 forced=%u",(unsigned)force_wifi);
+#endif
+            break;
+        }
         if (closing()) goto finished;
         if(cancelled())goto cancelled;
 
+        esp_err_t connection_error=err;
         update_state(ONBOARD_CONNECTING, "正在启动配网热点...", NULL);
         err = setup_portal_start(&s_state.portal);
         if (err != ESP_OK) {
@@ -209,10 +243,14 @@ network_setup:
             update_state(ONBOARD_ERROR, "无法启动配网，请重启设备", NULL);
             goto finished;
         }
-        if(!force_wifi)wifi_notice=err==ESP_ERR_TIMEOUT ? "连接超时，请重新配网":"连接未成功，请重新配网";
+        if(!force_wifi)wifi_notice=connection_error==ESP_ERR_TIMEOUT ? "连接超时，请重新配网":"连接未成功，请重新配网";
         update_state(ONBOARD_WIFI_SETUP, wifi_notice, NULL);
+#ifdef FEISHU_ONBOARDING_AUTOTEST
+        ESP_LOGI(TAG,"ONBOARD_RETRY_TEST portal=1 consumed=%u",(unsigned)!feishu_store_wifi_setup_required());
+        product_onboarding_key(BSP_BTN_OK,BSP_BTN_CLICK);
+#endif
         bool wifi_usb_started = feishu_provision_start_wifi() == ESP_OK;
-        while (!closing() && !cancelled() && !setup_portal_credentials_received() &&
+        while (!closing() && !cancelled() && !s_state.retry_wifi && !setup_portal_credentials_received() &&
                !(wifi_usb_started && feishu_provision_credentials_received())) {
             feishu_provision_commit_pending();
             vTaskDelay(pdMS_TO_TICKS(200));
@@ -222,8 +260,9 @@ network_setup:
             setup_portal_stop();
             goto finished;
         }
-        vTaskDelay(pdMS_TO_TICKS(800));
+        if(!s_state.retry_wifi)vTaskDelay(pdMS_TO_TICKS(800));
         setup_portal_stop();
+        xSemaphoreTake(s_lock,portMAX_DELAY);s_state.retry_wifi=false;xSemaphoreGive(s_lock);
         if(cancelled())goto cancelled;
         force_wifi=false;
         wifi_notice="";
@@ -264,7 +303,7 @@ configure_owner_app:
             if(!auth_wait(5000))break;
             continue;
         }
-        update_state(ONBOARD_BINDING,"飞书扫码确认用户数据授权\n长按确定取消",request.verification_url);
+        update_state(ONBOARD_BINDING,"飞书扫码完成BOT授权",request.verification_url);
         printf("FAP-SETUP/1 AUTH %s\n",request.verification_url);
         int64_t deadline=esp_timer_get_time()+(int64_t)request.expires_in*1000000;
         unsigned interval=request.interval>60?60:request.interval;
@@ -316,6 +355,24 @@ finished:
     xSemaphoreGive(s_worker_done);vTaskDelete(NULL);
 }
 
+static const char *qr_caption(onboarding_page_t page)
+{return page==ONBOARD_APP_SETUP ? "完成后继续BOT授权":"完成后以你的身份收发消息";}
+
+static void startup_layout(bool starting)
+{
+    if(s_startup_layout==starting)return;
+    s_startup_layout=starting;
+    uint32_t count=lv_obj_get_child_count(s_screen);
+    for(uint32_t i=0;i<count;++i){
+        lv_obj_t *child=lv_obj_get_child(s_screen,i);if(child==s_body)continue;
+        if(starting)lv_obj_add_flag(child,LV_OBJ_FLAG_HIDDEN);
+        else if(child!=s_qr && child!=s_step)lv_obj_remove_flag(child,LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_set_style_text_font(s_body,starting ? &lv_font_unscii_16:&lv_font_ai_passport_14,0);
+    lv_obj_set_width(s_body,starting ? 240:216);
+    if(!starting){lv_obj_set_style_opa(s_body,LV_OPA_COVER,0);lv_obj_align(s_body,LV_ALIGN_TOP_LEFT,12,46);}
+}
+
 static void render(lv_timer_t *timer)
 {
     (void)timer;
@@ -325,6 +382,14 @@ static void render(lv_timer_t *timer)
     xSemaphoreGive(s_lock);
 
     feishu_ui_battery(s_battery,snapshot.battery_percent);
+    if(snapshot.page==ONBOARD_STARTING){
+        startup_layout(true);
+        /* Flash-resident frames reuse the existing label: no frame heap buffer. */
+        feishu_startup_label(s_body,lv_tick_get());
+        lv_obj_align(s_body,LV_ALIGN_CENTER,0,0);return;
+    }
+    startup_layout(false);
+    lv_obj_set_style_opa(s_body,LV_OPA_COVER,0);
     if (snapshot.revision != s_rendered_revision) {
         s_rendered_revision=snapshot.revision;s_rendered_page=snapshot.page;
         s_rendered_qr[0]='\0';feishu_qr_retry_reset(&s_qr_retry);
@@ -333,10 +398,10 @@ static void render(lv_timer_t *timer)
         bool auth=snapshot.page==ONBOARD_BINDING;
         bool qr=app || auth;
         lv_obj_set_style_text_color(s_body,lv_color_hex(FEISHU_TEXT),0);
-        lv_obj_set_style_text_color(s_notice,lv_color_hex(snapshot.page==ONBOARD_ERROR ? FEISHU_ERROR:FEISHU_MUTED),0);
+        lv_obj_set_style_text_color(s_notice,lv_color_hex(snapshot.page==ONBOARD_ERROR ? FEISHU_ERROR:FEISHU_SUCCESS),0);
         lv_label_set_text(s_notice,qr ? snapshot.status:snapshot.page==ONBOARD_ERROR ? "操作未完成":"");
         feishu_ui_actions(s_footer_actions,snapshot.page==ONBOARD_ERROR ? "确定重试  长按返回":"长按确定返回");
-        lv_obj_set_pos(s_body,12,qr ? 230:46);
+        lv_obj_align(s_body,LV_ALIGN_TOP_LEFT,12,qr ? 236:46);
         if(qr) {
             lv_obj_remove_flag(s_step,LV_OBJ_FLAG_HIDDEN);
             lv_label_set_text(s_step,app ? "第2/3步 | 选择BOT":"第3/3步 | BOT授权");
@@ -344,19 +409,20 @@ static void render(lv_timer_t *timer)
             lv_qrcode_set_dark_color(s_qr,lv_color_hex(app ? 0x245C96:0x146341));
         } else lv_obj_add_flag(s_step,LV_OBJ_FLAG_HIDDEN);
         if(snapshot.page==ONBOARD_CONNECTING) {
-            lv_label_set_text(s_title,"连接 Wi-Fi");lv_label_set_text(s_body,snapshot.status);
+            lv_label_set_text(s_title,snapshot.authorization_entry ? "BOT授权":"连接 Wi-Fi");lv_label_set_text(s_body,snapshot.status);
         } else if(snapshot.page==ONBOARD_AUTH_LOADING) {
-            lv_label_set_text(s_title,"连接飞书服务");lv_label_set_text(s_body,snapshot.status);
+            lv_label_set_text(s_title,snapshot.authorization_entry ? "BOT授权":"连接飞书服务");lv_label_set_text(s_body,snapshot.status);
         } else if(snapshot.page==ONBOARD_WIFI_SETUP) {
             lv_label_set_text(s_title,"连接设备热点");
             lv_label_set_text_fmt(s_body,"手机打开 Wi-Fi 设置\n\n%s\n无需密码，直接连接\n\n连接后打开配网页\nhttp://%s\n\n提示无互联网时请保持连接",snapshot.portal.ssid,snapshot.portal.address);
             lv_label_set_text(s_notice,snapshot.status);
+            feishu_ui_actions(s_footer_actions,"确定重试原网络  长按确定返回");
         } else if(app) {
             lv_label_set_text(s_title,"选择飞书BOT");
-            lv_label_set_text(s_body,"飞书扫一扫，选择或新建BOT\n完成后进入BOT授权");
+            lv_label_set_text(s_body,qr_caption(snapshot.page));
         } else if(auth) {
             lv_label_set_text(s_title,"BOT授权");
-            lv_label_set_text(s_body,"飞书扫一扫，授权BOT\n完成后以你的身份收发消息");
+            lv_label_set_text(s_body,qr_caption(snapshot.page));
         } else if(snapshot.page==ONBOARD_SUCCESS) {
             lv_label_set_text(s_title,"设置完成");lv_label_set_text(s_body,"飞书绑定成功\n\n正在打开会话…");
         } else {
@@ -376,14 +442,14 @@ static void render(lv_timer_t *timer)
             lv_obj_remove_flag(s_qr,LV_OBJ_FLAG_HIDDEN);
             if(recovering) {
                 lv_obj_set_style_text_color(s_body,lv_color_hex(FEISHU_TEXT),0);
-                lv_label_set_text(s_body,snapshot.page==ONBOARD_APP_SETUP ?
-                    "飞书扫一扫，选择或新建BOT\n完成后进入BOT授权":
-                    "飞书扫一扫，授权BOT\n完成后以你的身份收发消息");
+                lv_label_set_text(s_body,qr_caption(snapshot.page));
+                lv_obj_set_style_text_color(s_notice,lv_color_hex(FEISHU_SUCCESS),0);
+                lv_label_set_text(s_notice,snapshot.status);
             }
         } else {
             lv_obj_add_flag(s_qr,LV_OBJ_FLAG_HIDDEN);
-            lv_obj_set_style_text_color(s_body,lv_color_hex(FEISHU_ERROR),0);
-            lv_label_set_text(s_body,"二维码绘制失败，正在重试\n长按确定可返回");
+            lv_obj_set_style_text_color(s_notice,lv_color_hex(FEISHU_ERROR),0);
+            lv_label_set_text(s_notice,"二维码暂不可用，正在重试");
             ESP_LOGW(TAG,"QR draw failed: phase=%u bytes=%u",(unsigned)snapshot.page,(unsigned)strlen(snapshot.qr_data));
         }
     }
@@ -397,10 +463,12 @@ static void render(lv_timer_t *timer)
 void product_onboarding_enter(product_onboarding_complete_cb_t callback,int battery_percent)
 {
     memset(&s_state, 0, sizeof(s_state));
-    s_state.page = ONBOARD_CONNECTING;
+    s_state.authorization_entry=feishu_boot_take_authorization_entry();
+    s_state.page = s_state.authorization_entry ? ONBOARD_AUTH_LOADING:ONBOARD_STARTING;
+    if(s_state.authorization_entry)feishu_utf8_copy(s_state.status,sizeof(s_state.status),"正在准备授权二维码…");
     s_state.battery_percent=battery_percent;
     s_complete = callback;
-    s_completion_delivered = false;
+    s_completion_delivered = false;s_startup_layout=false;
     s_rendered_page = (onboarding_page_t)-1;
     s_rendered_revision=UINT32_MAX;
     s_rendered_qr[0] = '\0';
@@ -414,7 +482,7 @@ void product_onboarding_enter(product_onboarding_complete_cb_t callback,int batt
     lv_obj_set_style_bg_opa(s_screen,LV_OPA_COVER,0);
     lv_obj_set_style_border_width(s_screen, 0, 0);
     lv_obj_set_style_pad_all(s_screen, 0, 0);
-    feishu_ui_header(s_screen,&s_title,&s_battery);
+    feishu_ui_header(s_screen,&s_title,&s_battery,NULL);
     s_qr = lv_qrcode_create(s_screen);
     lv_qrcode_set_size(s_qr, 156);
     lv_qrcode_set_dark_color(s_qr, lv_color_hex(FEISHU_BG));
@@ -441,6 +509,7 @@ void product_onboarding_enter(product_onboarding_complete_cb_t callback,int batt
         lv_label_set_text(s_body, "内存不足，请重启设备");
         return;
     }
+    render(NULL);
     s_timer = lv_timer_create(render, 100, NULL);
     if (xTaskCreate(worker_task, "onboarding", 10240, NULL, 4,
                     &s_worker) != pdPASS) {
@@ -478,6 +547,12 @@ void product_onboarding_key(bsp_btn_t button,bsp_btn_ev_t event)
     if(button!=BSP_BTN_OK || s_lock==NULL)return;
     xSemaphoreTake(s_lock,portMAX_DELAY);
     onboarding_page_t page=s_state.page;
+    if(page==ONBOARD_STARTING){xSemaphoreGive(s_lock);return;}
+    if(page==ONBOARD_WIFI_SETUP && (event==BSP_BTN_CLICK || event==BSP_BTN_LONG)){
+        s_state.retry_wifi=true;
+        feishu_utf8_copy(s_state.status,sizeof(s_state.status),"正在重试已保存网络…");++s_state.revision;
+        xSemaphoreGive(s_lock);return;
+    }
     if(event==BSP_BTN_LONG && !s_state.worker_finished) {
         s_state.cancel_auth=true;
         if(page==ONBOARD_CONNECTING)s_state.return_to_wifi=true;

@@ -8,8 +8,11 @@
 #include "es8311_codec.h"
 #include "driver/i2s_std.h"
 #include "esp_log.h"
+#include <stdatomic.h>
 
 static const char *TAG = "bsp_audio";
+static atomic_bool s_active;
+bool bsp_audio_active(void){return atomic_load(&s_active);}
 
 static esp_codec_dev_handle_t s_dev;
 static i2s_chan_handle_t      s_tx, s_rx;
@@ -37,7 +40,7 @@ void bsp_audio_deinit(void) {
         i2s_channel_disable(s_rx);
         i2s_del_channel(s_rx);s_rx=NULL;
     }
-    s_opened=false;s_hz=0;s_bits=0;s_ch=0;
+    s_opened=false;s_hz=0;s_bits=0;s_ch=0;atomic_store(&s_active,false);
 }
 
 
@@ -97,8 +100,9 @@ static esp_err_t i2s_full_duplex_init(void) {
 esp_err_t bsp_audio_init(void) {
     if (s_dev) return ESP_OK;
 
+    atomic_store(&s_active,true);
     esp_err_t e = bsp_i2c_init();
-    if (e != ESP_OK) return e;
+    if (e != ESP_OK){atomic_store(&s_active,false);return e;}
 
     s_ctrl = audio_codec_new_i2c_ctrl(&(audio_codec_i2c_cfg_t){
         .port = BSP_I2C_PORT,

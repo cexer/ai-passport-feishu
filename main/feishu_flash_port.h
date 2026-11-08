@@ -13,3 +13,8 @@ unsigned feishu_flash_test_after_fault(void);
 typedef struct {uint32_t reads,writes,erases,read_us,write_us,erase_us,mapped_reads,driver_reads,verify_reads;} feishu_flash_profile_t;
 feishu_flash_profile_t feishu_flash_profile(void);
 #endif
+
+#ifdef FEISHU_ASSISTANT_AUTOTEST
+typedef struct {uint32_t calls,yields,idles;} feishu_flash_scheduler_probe_t;
+feishu_flash_scheduler_probe_t feishu_flash_scheduler_probe(void);
+#endif

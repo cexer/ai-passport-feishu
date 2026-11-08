@@ -15,7 +15,18 @@ feishu_flash_profile_t feishu_flash_profile(void) {return profile;}
 #define PROFILE_END(kind)
 #endif
 #define POOL_SIZE (1024u*1024u)
-static unsigned operations;
+static TickType_t cooperate_at;
+#ifdef FEISHU_ASSISTANT_AUTOTEST
+#include "esp_freertos_hooks.h"
+#include <stdatomic.h>
+static atomic_uint probe_idles;
+static uint32_t probe_calls,probe_yields;
+static TickType_t probe_report_at;
+static bool probe_hook_registered;
+static bool scheduler_idle_probe(void) {atomic_fetch_add(&probe_idles,1);return true;}
+feishu_flash_scheduler_probe_t feishu_flash_scheduler_probe(void)
+{return (feishu_flash_scheduler_probe_t){probe_calls,probe_yields,atomic_load(&probe_idles)};}
+#endif
 static const esp_partition_t *mapped_partition;
 static const void *mapped_pool;
 static esp_partition_mmap_handle_t mapped_handle;
@@ -24,7 +35,26 @@ void feishu_flash_port_close(void)
     if(mapped_pool)esp_partition_munmap(mapped_handle);
     mapped_pool=NULL;mapped_partition=NULL;mapped_handle=0;
 }
-static void cooperate(void) {if((++operations&127u)==0)vTaskDelay(1);}
+static void cooperate(void)
+{
+    TickType_t now=xTaskGetTickCount();
+#ifdef FEISHU_ASSISTANT_AUTOTEST
+    ++probe_calls;
+#endif
+    if((TickType_t)(now-cooperate_at)>=pdMS_TO_TICKS(4)){
+        /* One tick can be consumed entirely by another ready UI/audio task. */
+        vTaskDelay(2);cooperate_at=xTaskGetTickCount();
+#ifdef FEISHU_ASSISTANT_AUTOTEST
+        ++probe_yields;
+#endif
+    }
+#ifdef FEISHU_ASSISTANT_AUTOTEST
+    if((TickType_t)(now-probe_report_at)>=pdMS_TO_TICKS(1000)){
+        probe_report_at=now;
+        ESP_LOGI("feishu_flash","FLASH_SCHED calls=%u yields=%u idles=%u",(unsigned)probe_calls,(unsigned)probe_yields,(unsigned)atomic_load(&probe_idles));
+    }
+#endif
+}
 #ifdef FEISHU_STORAGE_AUTOTEST
 static int read_left=-1,write_left=-1;
 static bool partial_write,tripped;
@@ -121,6 +151,10 @@ static int erase_bytes(void *ctx,uint32_t at,size_t size)
 esp_err_t feishu_flash_port_open(feishu_fdb_io_t *io)
 {
     if(!io)return ESP_ERR_INVALID_ARG;
+    feishu_fdb_set_cooperate(cooperate);
+#ifdef FEISHU_ASSISTANT_AUTOTEST
+    if(!probe_hook_registered)probe_hook_registered=esp_register_freertos_idle_hook(scheduler_idle_probe)==ESP_OK;
+#endif
     const esp_partition_t *p=esp_partition_find_first(ESP_PARTITION_TYPE_DATA,
         ESP_PARTITION_SUBTYPE_ANY,"feishu_img");
     if(!p || p->address!=0x370000 || p->size!=POOL_SIZE)return ESP_ERR_INVALID_SIZE;

@@ -83,16 +83,24 @@ def verify_sqlite_ram(build_dir: Path) -> None:
 
 
 def verify_lvgl_pool(build_dir: Path) -> None:
-    """Catch a component update silently overriding the C3's 24 KiB UI pool."""
+    """Verify either the historical bounded pool or the explicit shared allocator."""
     from elftools.elf.elffile import ELFFile
+    config = (build_dir / "sdkconfig").read_text(encoding="utf-8")
     with (build_dir / "FoloToy-AI-Passport.elf").open("rb") as stream:
         elf = ELFFile(stream)
         symbols = elf.get_section_by_name(".symtab")
         pools = [s for s in symbols.iter_symbols() if s.name.startswith("work_mem_int.")]
-        if len(pools) != 1 or pools[0]["st_size"] != 24 * 1024:
-            sizes = [s["st_size"] for s in pools]
-            raise ValueError(f"LVGL pool violates the 24 KiB budget: {sizes}")
-    print("Verified LVGL static pool: 24576 bytes")
+        if "CONFIG_LV_USE_CLIB_MALLOC=y" in config:
+            if pools or "CONFIG_LV_USE_BUILTIN_MALLOC=y" in config:
+                raise ValueError("Shared LVGL allocator unexpectedly reserves a static pool")
+            link_map = (build_dir / "FoloToy-AI-Passport.map").read_text(encoding="utf-8")
+            if "liblvgl__lvgl.a(lv_mem_core_clib.c.obj)" not in link_map:
+                raise ValueError("LVGL shared allocator implementation is not linked")
+            print("Verified LVGL shared C allocator: no static GUI pool")
+        else:
+            if "CONFIG_LV_USE_BUILTIN_MALLOC=y" not in config or len(pools) != 1 or pools[0]["st_size"] != 24 * 1024:
+                raise ValueError(f"Unsupported LVGL allocator/pool: {[s['st_size'] for s in pools]}")
+            print("Verified historical LVGL static pool: 24576 bytes")
 
 
 def main() -> int:

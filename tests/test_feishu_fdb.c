@@ -11,6 +11,10 @@ static int read_cut=-1, write_cut=-1, erase_cut=-1;
 static bool short_io;
 static unsigned reads,writes,erases,blocked_writes;
 static size_t read_bytes_total;
+static unsigned cooperation_count,visited_count;
+static void cooperative_tick(void) {++cooperation_count;}
+static bool visited(const char *key,size_t size,void *context)
+{(void)key;(void)size;(void)context;++visited_count;return false;}
 static bool tripped;
 static const char *phase="basic";
 static int fault_position=-1;
@@ -81,6 +85,7 @@ static void reopen(void)
 }
 int main(void)
 {
+    feishu_fdb_set_cooperate(cooperative_tick);
     memset(flash,0xff,sizeof(flash));
     assert(feishu_fdb_open(&io,false)!=FEISHU_FDB_OK);
     assert(!writes && !erases);
@@ -234,7 +239,16 @@ int main(void)
         assert(feishu_fdb_put(key,data,512)==FEISHU_FDB_OK);
     }
     size_t admission_reads=read_bytes_total;
-    assert(admission_reads<512u*1024u);feishu_fdb_close();
+    assert(admission_reads<512u*1024u);
+    unsigned physical_before=reads;cooperation_count=visited_count=0;
+    assert(feishu_fdb_visit(visited,NULL)==FEISHU_FDB_OK && visited_count==140);
+#ifndef FDB_READ_CACHE_MALLOC
+    assert(cooperation_count>reads-physical_before); /* Cache hits also cooperate. */
+#else
+    assert(cooperation_count>0); /* Deliberately denied cache: direct reads cooperate. */
+#endif
+    printf("FlashDB cooperative cache scan: logical=%u physical=%u records=%u PASS\n",cooperation_count,reads-physical_before,visited_count);
+    feishu_fdb_close();feishu_fdb_set_cooperate(NULL);
     printf("FlashDB raw guard: %u open read faults, %u get read faults, %u mutation read faults, %u interrupted writes, %u full-store/GC write faults, full=%d, 140 admissions read=%zu bytes, reopen/protection PASS\n",open_cases,get_cases,operation_read_cases,write_cases,gc_faults,count,admission_reads);
     return 0;
 }

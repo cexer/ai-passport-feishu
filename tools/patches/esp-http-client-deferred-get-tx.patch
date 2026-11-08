@@ -1,0 +1,77 @@
+--- a/components/esp_http_client/esp_http_client.c
++++ b/components/esp_http_client/esp_http_client.c
+@@ -13,6 +13,7 @@
+ #include "esp_check.h"
+ #include "http_parser.h"
+ #include "http_header.h"
++#include "http_tx_lifetime.h"
+ #include "esp_transport.h"
+ #include "esp_transport_tcp.h"
+ #include "esp_transport_ssl.h"
+@@ -134,6 +135,7 @@
+     int                         buffer_size_rx;
+     int                         buffer_size_tx;
+     bool                        disable_auto_redirect;
++    bool                        defer_get_tx; /* Local opt-in; public config ABI unchanged. */
+     esp_http_client_event_t     event;
+     int                         data_written_index;
+     int                         data_write_left;
+@@ -191,6 +193,18 @@
+     "MKCOL",
+     "REPORT"
+ };
++
++esp_err_t esp_http_client_defer_get_tx_buffer(esp_http_client_handle_t client)
++{
++    if (!client) return ESP_ERR_INVALID_ARG;
++    if (client->state != HTTP_STATE_INIT) return ESP_ERR_INVALID_STATE;
++    if (client->connection_info.method != HTTP_METHOD_GET || !client->disable_auto_redirect || client->post_len)
++        return ESP_ERR_INVALID_ARG;
++    client->defer_get_tx = true;
++    esp_http_tx_release(&client->request->buffer->data, client->buffer_size_tx, free);
++    ESP_LOGI(TAG, "HTTP_TX_DEFER bytes=%d", client->buffer_size_tx);
++    return ESP_OK;
++}
+ 
+ esp_err_t esp_http_client_request_send(esp_http_client_handle_t client, int write_len);
+ static esp_err_t esp_http_client_connect(esp_http_client_handle_t client);
+@@ -1685,6 +1699,11 @@
+         return ESP_FAIL;
+     }
+ 
++    bool lazy = client->request->buffer->data == NULL;
++    if (!esp_http_tx_acquire(&client->request->buffer->data, client->buffer_size_tx, malloc))
++        return ESP_ERR_NO_MEM;
++    if (lazy && client->defer_get_tx) ESP_LOGI(TAG, "HTTP_TX_AFTER_TLS bytes=%d", client->buffer_size_tx);
++
+     int first_line_len = 0;
+     if (!client->first_line_prepared) {
+         if ((first_line_len = http_client_prepare_first_line(client, write_len)) < 0) {
+@@ -1738,6 +1757,10 @@
+         wlen = client->buffer_size_tx;
+     }
+ 
++    if (esp_http_tx_finish(client->defer_get_tx, client->connection_info.method == HTTP_METHOD_GET,
++                           client->data_write_left, client->post_len, &client->request->buffer->data,
++                           client->buffer_size_tx, free))
++        ESP_LOGI(TAG, "HTTP_TX_RELEASED bytes=%d", client->buffer_size_tx);
+     client->data_written_index = 0;
+     client->data_write_left = client->post_len;
+     client->state = HTTP_STATE_REQ_COMPLETE_HEADER;
+--- a/components/esp_http_client/include/esp_http_client.h
++++ b/components/esp_http_client/include/esp_http_client.h
+@@ -566,6 +566,14 @@
+ esp_err_t esp_http_client_set_method(esp_http_client_handle_t client, esp_http_client_method_t method);
+ 
+ /**
++ * @brief Opt in a fresh, redirect-disabled GET client to deferred TX storage.
++ * Allocate request scratch only when headers are sent, after TLS handshake;
++ * wipe/release it after a zero-body GET's complete headers. POST and clients
++ * that do not opt in retain their original allocation lifecycle.
++ */
++esp_err_t esp_http_client_defer_get_tx_buffer(esp_http_client_handle_t client);
++
++/**
+  * @brief      Set http request timeout
+  *
+  * @param[in]  client      The esp_http_client handle

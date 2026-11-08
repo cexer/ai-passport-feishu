@@ -9,7 +9,7 @@ else()
     message(FATAL_ERROR "Unsupported FEISHU_STORAGE_BACKEND")
 endif()
 idf_component_register(
-    SRCS "main.c" "feishu_qr_retry.c"
+    SRCS "main.c" "feishu_qr_retry.c" "feishu_boot.c" "feishu_power.c"
          "ui_pixel.c"
          "ui_pixel_math.c"
          "demo_radio.c"
@@ -20,6 +20,7 @@ idf_component_register(
          "feishu_voice.c"
          "feishu_auth_policy.c"
          "feishu_asr.c" "feishu_xiaozhi_protocol.c" "feishu_xiaozhi_audio.c" "feishu_asr_batch.c" "feishu_adpcm.c" "feishu_internal_asr_protocol.c"
+         "feishu_feedback.c" "feishu_outgoing_mentions.c" "feishu_compose.c" "feishu_mcp.c" "feishu_mcp_wire.c" "feishu_xiaozhi_downlink.c" "feishu_xiaozhi_player.c"
          "feishu_http.c"
          "feishu_model.c" "feishu_page.c" "feishu_recovery.c"
          "feishu_network.c"
@@ -45,11 +46,30 @@ idf_component_register(
          "lv_font_ai_passport_14.c"
          ${feishu_storage_sources}
     INCLUDE_DIRS "."
-    REQUIRES bsp esp_event esp_hw_support esp_http_client esp_http_server esp_netif esp_timer
-             esp_wifi tcp_transport json mbedtls nvs_flash spiffs ${feishu_storage_requires} heatshrink esp_partition jsonsl feishu_jpeg
+    REQUIRES esp_pm esp_app_format bsp esp_event esp_hw_support esp_http_client esp_http_server esp_netif esp_timer
+             esp_wifi tcp_transport json mbedtls nvs_flash spiffs ${feishu_storage_requires} heatshrink esp_partition jsonsl feishu_jpeg esp_audio_codec
 )
 
 target_compile_options(${COMPONENT_LIB} PRIVATE -Os)
+if("$ENV{FEISHU_ASSISTANT_AUTOTEST}" MATCHES "^[12345]$")
+    if(NOT "$ENV{FEISHU_VOICE_AUTOTEST}" STREQUAL "1" OR NOT FEISHU_ASR_BACKEND STREQUAL "xiaozhi")
+        message(FATAL_ERROR "Assistant diagnostic requires explicit XiaoZhi voice fixture injection")
+    endif()
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE FEISHU_ASSISTANT_AUTOTEST=1)
+    if("$ENV{FEISHU_ASSISTANT_AUTOTEST}" MATCHES "^[2345]$")
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE FEISHU_ASSISTANT_TEST_FIRST=7)
+    endif()
+    if("$ENV{FEISHU_ASSISTANT_AUTOTEST}" STREQUAL "4")
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE FEISHU_GLOBAL_AUTOTEST=1)
+    endif()
+    if("$ENV{FEISHU_ASSISTANT_AUTOTEST}" STREQUAL "5")
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE FEISHU_COLLAB_AUTOTEST=1)
+    endif()
+    if("$ENV{FEISHU_ASSISTANT_AUTOTEST}" MATCHES "^[35]$")
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE FEISHU_DRAFT_RAM_AUTOTEST=1)
+    endif()
+    target_include_directories(${COMPONENT_LIB} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../build/assistant-autotest")
+endif()
 if("$ENV{FEISHU_NETWORK_UI_AUTOTEST}" STREQUAL "1")
     target_compile_definitions(${COMPONENT_LIB} PRIVATE FEISHU_NETWORK_UI_AUTOTEST=1)
 endif()
@@ -129,5 +149,30 @@ if("$ENV{FEISHU_MCP_DIAGNOSTIC}" STREQUAL "1")
         message(FATAL_ERROR "MCP diagnostic requires XiaoZhi and ordinary heap configuration")
     endif()
     target_compile_definitions(${COMPONENT_LIB} PRIVATE FEISHU_MCP_DIAGNOSTIC=1)
-    target_sources(${COMPONENT_LIB} PRIVATE "feishu_mcp.c" "feishu_mcp_wire.c")
+endif()
+
+if("$ENV{FEISHU_ONBOARDING_AUTOTEST}" STREQUAL "1")
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE FEISHU_ONBOARDING_AUTOTEST=1 FEISHU_VOICE_AUTOTEST=1)
+endif()
+
+if("$ENV{FEISHU_ASSISTANT_TIMEOUT_AUTOTEST}" STREQUAL "1")
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE FEISHU_ASSISTANT_TIMEOUT_AUTOTEST=1)
+endif()
+
+if("$ENV{FEISHU_LVGL_RECOVERY_AUTOTEST}" STREQUAL "1")
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE FEISHU_LVGL_RECOVERY_AUTOTEST=1)
+endif()
+
+if("$ENV{FEISHU_COMPOSE_FLOW_AUTOTEST}" STREQUAL "1")
+    if(NOT "$ENV{FEISHU_ASSISTANT_AUTOTEST}" STREQUAL "4")
+        message(FATAL_ERROR "Compose flow injection requires the explicit global voice diagnostic")
+    endif()
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE FEISHU_COMPOSE_FLOW_AUTOTEST=1)
+endif()
+
+if("$ENV{FEISHU_SCENARIO_AUTOTEST}" STREQUAL "1")
+    if(NOT "$ENV{FEISHU_ASSISTANT_AUTOTEST}" STREQUAL "4")
+        message(FATAL_ERROR "Seeded scenarios require the explicit global voice diagnostic")
+    endif()
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE FEISHU_SCENARIO_AUTOTEST=1 FEISHU_MEMORY_RECOVERY_AUTOTEST=1)
 endif()

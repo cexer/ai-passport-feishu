@@ -339,7 +339,7 @@ and sustained device behavior remain unverified.
 
 Validated on 2026-11-02: complete build/host gate PASS; seven simulator integration
 checks PASS with hardware fidelity caveats. Production first boot reaches the
-Wi-Fi QR page. APP: 2,188,352 bytes; merged BIN: 2,253,888 bytes. The APP is 335,200
+Wi-Fi QR page. APP: 2,188,352 bytes; merged BIN: 2,254,256 bytes. The APP is 335,200
 bytes (13.28%) smaller than the first local build, with the full Chinese font.
 Merged SHA-256: `ab84f805336eef4373fa27ca0000fc128edb3bc91e3a467c88ed208844cad911`.
 Matching artifacts are under `build/accepted`; the integration summary and
@@ -545,3 +545,415 @@ A driver config measures 184 bytes: ten plus a 16-byte header require 1,856 logi
 Separate silent probes of the existing XiaoZhi identity received no audio for two direct-TTS variants in six-second windows. The listen/detect route explicitly rejected long text as wake-word-only. The hello response advertised Opus/24 kHz. The current ASR integration therefore does not establish original-text playback support; a synthesis endpoint is needed before adding a working automatic-playback setting.
 
 Evidence: `build/device-checkpoint/network-focus-r2-native.json`, `build/network-focus-r2-gallery-screenshots/result.json`, `build/xiao-tts-interface-report.json`, `build/xiao-tts-alert-report.json`; archive: `build/feishu-network-ui-20261106.zip`. The earlier navigation-entry timeout rolled back automatically; `network-actions-r2-native.json` remains failed evidence. The installed version fixes entry-page ownership and repaint detection for page-owned state.
+
+## XiaoZhi assistant initial acceptance (2026-11-06)
+
+Installed ordinary APP: 2,189,984 bytes, SHA-256 `8e11486e6f1866ea05c55f88a675a16a941a9af77e88ac9cda9e3877376514ef`. APP-only installation
+retained binding, protected identity, partition table and the existing font.
+The diagnostic was removed; ordinary startup loaded ten cached conversations
+and successfully refreshed ten live conversations. Message announcements/Edge
+TTS remain paused. The assistant uses XiaoZhi reply audio; ordinary dictation
+still takes STT text and aborts the reply.
+
+| Layer | Current evidence | Limit |
+| --- | --- | --- |
+| Build / Host | Complete gate PASS; typed/index argument checks, mutual exclusion of chat ID/index, paginated discovery, 2 MiB no-storage preview stream, 100000 packet resets and 1000 decoder-adapter lifecycles | Host codec is a fake; actual Opus evidence is device-only |
+| Native protocol / audio | Seven scenes PASS on the real configured device: list chats, open settings, save/clean an owned draft, cancel, capture failure, fresh latest-message read after failures, open a chat and apply its message list | Synthetic input overlays real capture; output volume zero; no business message sent |
+| Targets / data | Draft/read/open selected index zero; test draft object and UUID checked before cleanup; ordinary binding and protected regions compared | Current cached conversation page only; no full-directory search |
+| Resources | Latest confirmed suite minimum heap 23,420 B; another run observed 20,212 B; worker minimum stack headroom 1044 B | The 20 KiB heap goal is not a universal guarantee; longer mixed pressure remains open |
+| Physical / intent | Hardware key feel, real microphone/prefix and audible quality pending | Compound requests sometimes stopped after listing; single-intent routing is the current acceptance boundary |
+
+Use Settings → XiaoZhi assistant. OK starts speech, OK finishes capture, long OK
+cancels the turn. Message requests save a durable draft; the user confirms send
+through the existing device UI. No direct send MCP tool exists.
+
+The assistant preview API does not persist/compress a full message just to answer
+a query. Wire JSON is allocated on demand and released per message/before tool
+HTTP calls; MCP response memory is absent during audio. Earlier stack failures
+and the first serial-summary gap remain in their reports, rather than being
+relabeled as passes. Evidence: `assistant-r8b-native.json`,
+`assistant-r8-installed.json`, `assistant-r8-final-gate-status.json` under `build/`;
+design and reproducible fixtures: `docs/software-design/feishu-assistant.md`,
+`tools/assistant_probe/README.md`.
+
+## Continuous assistant acceptance (2026-11-06)
+
+Ordinary APP 2,195,952 B, SHA-256 `01ebec828784eed9c35619b2bcc618f3c52de487d4d0d979a110ade029c2548d`. Full gate PASS; native R8 eight
+scenes PASS, including a greeting, list/read/goodbye in one WSS visit, then
+actual applied message-list loading. Synthetic input and muted diagnostic output;
+real cloud tools and Opus/PCM. No business sends. Binding, Wi-Fi, existing
+drafts, protected identity, partition table and font retained. Ordinary boot PASS.
+
+Both input paths now send 16kHz PCM from the fixed 8kHz PCM6 queue; no full
+recording allocation. Defaults: boot assistant off, silence three seconds.
+Global double-OK enters; long OK exits. XiaoZhi settings separates account and
+assistant settings. Physical speech, keys, sound quality, all setting choices
+on hardware, real noise, extended sessions and power loss remain unverified.
+Minimum heap in this suite: 24,796 B; worker stack minimum: 996 B.
+Failures and the cancelled-load test ordering are retained in earlier reports.
+
+## Disposable single-draft acceptance (2026-11-06)
+
+APP 2,199,216 B; SHA-256 `0d9d3efa9b676b3c76ee0a136fbb167605a0355ea0c1c6398477df2fe66768c8`. Full Build/Host gate PASS. Actual FlashDB
+replacement, failed publication, old-state recovery, clear/reuse, reader-protected
+pressure and idle eviction/ghost cleanup PASS. Native injected draft-storage failure
+retains a complete message in RAM, restores it through Draft management, and
+rejects substitution after failed recipient lookup. No business POST in this test.
+Ordinary APP-only installation and cached/live conversation startup PASS.
+Actual target-group sending, physical UI and real power loss remain unverified.
+Evidence: single-draft-ram-native.json, single-draft-installed.json, single-draft-gate-status.json.
+
+## Global assistant and collaborative editing regression (2026-11-07)
+
+Build: PASS; Host tests: PASS, complete R8 gate. Ordinary APP 2,228,416 B,
+SHA-256 `de783b5a5856a32fdf27bc1e5b8a28af9079283f90d6a6f5ac8f224ac93b26ea`.
+This candidate is now installed on COM7. APP-only hash verification and a 45-second boot check passed; cached/live conversations and account/Wi-Fi binding were retained. No rollback occurred.
+
+Device tests: PASS for the two bounded, muted diagnostic suites. Global listening
+retained one connection across background message/conversation loads, member
+lookup, three synthetic speech turns and goodbye. Minimum free heap 21,924 B;
+worker stack minimum 2,564 B. The previous R6 low-water mark was 5,256 B. These
+are scenario measurements, not a universal reserve guarantee.
+
+The real cloud called read_draft then edit_draft for an injected current-draft
+utterance. Recipient preservation, stale revisions, undo, uncertain/oversized
+content rejection, physical confirmation and RAM restoration after storage failure
+passed. Minimum heap 21,108 B; worker stack minimum 2,340 B. Neither suite sent
+a business message. Binding, identity, partition table and font were retained;
+the original ordinary APP was restored after each suite.
+
+Simulator: ten fixed-data scenes plus a second breathing-state capture passed
+full-width header/footer, badge and text checks. Physical-device rendering and
+acoustic quality are not established by these screenshots. Unverified: real
+physical speech, actual structured @ delivery, post-send list echo, extended
+sessions and power loss. Earlier ordinal-selection failure remains recorded;
+recipient guards were not relaxed. Reports: global-assistant-r8-native.json,
+collab-edit-r8-native.json, global-assistant-r8-gate-status.json and
+assistant-gallery-r7-screenshots/result.json under build.
+
+### Ordinal target-selection retest
+
+Native integrated-compose-r8 passed: the real model prepared chat_index0 directly. Recipient guard, RAM restoration and revision/edit/undo checks passed; minimum heap25,660 B and stack2,340 B. No business sends. The earlier R6 failure remains retained, and the guard was not relaxed. Ordinary fallback restoration and binding verification passed.
+
+## Conversation controls, volume and startup repair (2026-11-07)
+
+Full R10 Build/Host gate PASS. Ordinary APP 2,230,176 B SHA-256
+`60e9f0622505a5da80cb7cfab9a88a9b5088cb44561ab0c2bc6435a6e01f7fa7` is now installed,
+not rolled back. Header badge moves to x158; conversation voice activity retains
+long-OK Settings and labels silence-only submission. Ordinary business OK is no
+longer intercepted by voice capture. New defaults use two seconds; explicit older
+choices are preserved. Version-two four-byte assistant settings add 0..100 volume;
+version one reads with volume60. Host bounds/reopen/legacy/corrupt tests pass.
+
+Native reboot before repair found bound0/forced-WiFi1. An encrypted pool snapshot
+showed valid BOT credentials and remembered Wi-Fi but an empty personal refresh
+token; this is not evidence that the whole pool was lost. The original trigger
+for token clearing remains unverified. Forced portal requests are now consumed
+once, and OK/long-OK in the portal retries remembered Wi-Fi. The muted native
+probe exercised the actual key handler: request consumed, portal retry and saved
+network connection PASS. The ordinary candidate then booted with WiFi-setup0,
+connected successfully and displayed personal authorization. Identity, table and
+font remained unchanged; the user subsequently completed authorization. A separate ordinary reboot retained bound1/WiFi-setup0 and read ten live conversations successfully (r10-authorized-reboot.json).
+
+Production startup screenshot PASS: bounded breathing title/progress dots,
+no empty control-only page, a short success tone respecting the sound switch.
+Twelve fixed-data gallery scenes plus breathing capture PASS; active-chat footer,
+right-aligned badge, volume row/editing and defaults inspected. These are simulator
+images. Actual listening, audible volume choices, startup sound quality and the
+new candidate's authorized live-session regression remain pending. Evidence:
+ui-onboarding-r10-installed.json; ui-onboarding-r10-gate-status.json;
+assistant-gallery-r10-screenshots/result.json; startup-r10b-screenshots/result.json.
+
+## Assistant activation/capture regression repair (2026-11-07)
+
+Build: PASS; Host tests: PASS (full R14 gate). Installed ordinary APP 2,230,896 B,
+SHA-256 `d9458d7bff3762e8ce203d44f58a2518ee08e0a36e192c51d640f1daed22f8e7`.
+Actual R10 reproduction connected and greeted successfully, then failed with263:
+quiet capture could fill its queue while the worker waited. R11 idle-only repair
+failed the voiced regression. R12 profiling showed a198ms median processing loop
+against20ms input; the invisible capture clock forced full list/font repaint and
+per-frame UI mutex dependencies delayed audio. These failed runs are retained.
+
+The producer now retains only six idle frames in the existing pool. On onset it
+publishes that prefix and every spoken frame in order. Business paint ignores the
+invisible clock; capture reads a four-byte atomic timing snapshot, feedback with
+no pending sound avoids the UI lock, and work polling uses a nonblocking snapshot.
+No audio queue expansion. Binary writes have a2s deadline within the2.4s capture
+budget, and ambiguous failed frames are never replayed.
+
+Device: PASS for five-second worker-stall pressure, live page work/member lookup,
+three real-cloud synthetic turns (list/read/goodbye), cleanup and ordinary boot.
+572 successful frame writes, median3ms, maximum53ms; peak ready queue6/120; no failed
+writes or backpressure. Minimum heap20,948 B, worker stack minimum2,516 B. New
+ordinary firmware remains installed, binding/identity/table/font preserved. No
+business POST. Physical speech and extended adverse-network acceptance remain
+unverified. Evidence: assistant-idle-r14-native.json and -metrics.json; earlier
+R11/R12b voiced failures and R13 one-second write timeout remain separate. One
+interrupted USB-transfer summary is explicitly reconstructed after a retry reused
+its report filename; it is not represented as an original raw log.
+
+
+R17: Build/Host full gate PASS; ordinary APP 2,232,256 bytes,
+SHA256 `1c1fce6c99057a095dd14bc3707ea14edb42fc3274c18c01c2b1c970c330a35b`.
+Simulator: sixteen frames have zero normalized glyph displacement; suffix covers
+zero to three dots and four status/settings scenes pass. APP-only device install
+and ordinary boot PASS (bound=1, wifi_setup=0); identity/table/font unchanged.
+R16 native suite passed accelerated capture expiry/cleanup, five-second idle
+pressure, three synthetic-input cloud turns and idle continuation after turn two.
+No business messages sent. Original spontaneous exit was not reproduced;
+physical speech/acoustics and long-duration network behavior remain unverified.
+
+
+R19: full Build/Host gate PASS. Native fault injection PASS: reply preemption with decoder released, cached/network message load, one failed glyph allocation, continued GUI heartbeat and actual back handler, five-second idle stall, three cloud turns and goodbye cleanup. APP-only install/boot retained binding/WiFi; identity/table/font unchanged. R18 overall FAIL was retained: injected back cancelled the concurrent load probe; R19 separates the two steps. Physical buttons, real voice and long-term stability remain unverified. APP 2230752 bytes, SHA256 `689205243ae84f2579fda94fd32c16ef9307562816c4f0a46d82ff1f4e37f399`.
+
+
+R20 Build/Host full gate PASS; APP 2232992 bytes, SHA256 `6e2a5caa65c77fb912f38b40661b58cc5bf2c2c01f0155614741a9de88ecf017`. Native tool/state tests: direct empty editor, empty/stale confirmation rejection, actual edits, 18-second confirmation wait with a real 15-second WSS ping, cancel then edit, dry send-owner handoff, five-second idle pressure and three cloud turns/cleanup PASS. No business POST. Ordinary APP-only install retained binding/WiFi, identity/table/font. Original reported disconnect not captured; natural-language tool selection, physical OK and real send remain user acceptance.
+
+
+R25 final: Build/Host full gate PASS; ordinary APP 2237104 bytes, SHA256 `27c38652f0265edc9dde0aac907b2c60780cabca685557041f45c4f462e7fa16`. Native PASS: three fixed seeds, 30 forced-network reads, 30 cache reads, 144 mixed UI operations, 3 UI-task cancellations; memory-owner recovery, initial and capture-idle wire-fault recovery, 75-second quiet interval, full MCP-page registration before actual mic READY, business callbacks never READY, real cloud open_chat then ready/read/bye. Minimum free heap 23032 bytes since boot, worker stack 2452 bytes observed, no universal reserve claimed. No actual POST. Image/detail counters are branch attempts, not physical media/display acceptance. R21/R22 failed reports retained separately. Ordinary install preserved binding/WiFi/identity/table/font; volume0 and all three sound flags remain off until explicit restoration. Human speech/acoustics, physical keys and real delivery remain unverified.
+
+
+R27: full Build/Host gate PASS; ordinary APP 2237600 bytes, SHA256 235e15a712d7bdccc78ef10acb83fa67a2e6ff1340edf7fde8097c1f7f40a4dc. Versus R25, APP +496 bytes and main UI state +8 bytes; no new persistent task/audio pool. Native PASS: actual LVGL sending title/recipient/body retained; same-activation owner recovery skips greeting; 30 cold/30 warm reads, 144 mixed actions, 3 cancellations; cloud open-chat then listen, 75-second quiet interval and wire recovery. Observed minimum heap 20940 bytes, worker stack 2452 bytes (not a universal reserve). Ordinary APP installed, binding/identity/table/font preserved, volume0/all sound flags off. No actual POST; human acoustics, physical keys and delivery remain unverified. Concise hint uses MCP initialize instructions; the client may ignore it, so strict length is unverified. Triple-press driver support confirmed; no new binding. Failed R26 evidence retained separately.
+
+
+### Continuous standby qualification (R38)
+
+- Continuous standby capture: ordinary R38 full Build/Host gate and full native pressure/fault regression PASS; earlier focused native evidence retained separately.
+- Native PASS: same capture task/queue retained through reads; a real GET overlapping speech onset yields, then cloud recognition retains opening intent; battery sampling/30s successful network refresh do not restart capture; 75s quiet interval, wire recovery, three cloud turns and goodbye.
+- Also 30 cold/30 warm reads, 144 mixed actions, 3 cancellations, collaborative editor and sending-page preservation.
+- Ordinary APP 2238720 bytes, SHA256 226697d7e2adb5bab90f6422e79b8be529140a272c45d7d1fc0ec7a07b1e8caa, APP-only installed with binding/WiFi/identity/table/font retained.
+- Reuses original120-frame (~2.4s) queue; no new audio pool/persistent task.
+- Observed minimum heap 5928 and worker stack 2452 bytes, not universal reserves.
+- Volume0/all sound flags off.
+- No business-message POST.
+- Human acoustics/physical keys/delivery, arbitrary network stalls and acoustic playback barge-in remain unverified.
+- Earlier network, fixture-timeout and reply-preemption failures retained separately, never counted as passes..
+
+## Task completion and collaborative editor R39
+
+- Build and host: complete gate PASS.
+
+- Native function and pressure: 30 cold reads, 30 warm reads, 144 mixed operations and three actual UI cancellations/recoveries PASS. Current-context empty editor, no recipient guessing, confirmation/cancel, memory/wire recovery and continuous capture PASS.
+
+- Cloud ordering: actual open_chat data ready at 371980 ms, tool return at 371981 ms, elapsed 1234 ms; reply audio started at 373169 ms.
+
+- Installed ordinary APP: 2240176 bytes; SHA256 `07e235725d5df6d4ed6127306c0b79e8ec8cfc0cbd8c03a749c77459ae24cc7e`. Binding, identity, table and font preserved.
+
+- Memory boundary: stress minimum free heap 4412 bytes, not constant available RAM. No business-message POST.
+
+- Human acceptance pending: voice-to-composer intent routing, visible stale-dictation takeover, acoustic quality and consistently short model acknowledgements.
+
+
+## Voice controls and concurrent memory qualification (R53)
+
+| Layer | Result and evidence |
+| --- | --- |
+| Build | Full gate PASS; ordinary APP 2246576 bytes, SHA256 `fc307a1acb8a079760625b335b76fc90a673c20d4efe67e9ff6f2c9f85c6b021`. Matched APP/ELF/MAP/merged/font/config/source bundles retained locally. |
+| Host | Full logic/static gate PASS, including MCP argument validation, audio queue budgets, EAGAIN handling and opt-in HTTP TX lifetime/partial-header/body/POST/wipe/OOM cases. |
+| Native controls | Seven persisted settings and delta, navigation, validated original-message reply targets, same-turn/stale/duplicate/full-queue rejection, later-turn one-send handoff and confirmation capture PASS. Business send queue was consumed by the diagnostic before POST. |
+| Native pressure | 30 cold reads, 30 warm reads, 144 mixed actions, three actual UI cancellations/recoveries; 72 parser lifetimes each followed TLS/request TX release. No real TLS OOM, watchdog or unexpected replay/reconnect. |
+| Native audio/cloud | Capture retained during actual HTTPS, speech preemption with complete opening intent, 80-to-120-slot promotion before upload, deferred read resume, background refresh/battery with capture live, confirmation keepalive, 75-second quiet standby, memory/initial-wire/idle-wire recovery and three cloud turns/goodbye PASS. |
+| Independent audit | Actual open_chat data-ready before tool return, 589 ms; TX/parser ordering and frozen source integrity verified. |
+| Installation | Ordinary candidate installed APP-only; binding/WiFi, identity, partition table and font unchanged. Probe inactive; volume zero and sound flags off retained. |
+
+Observed minima are 2,824 bytes free heap since boot, 2,416 bytes business-worker
+stack and 2,740 bytes LVGL stack; these are finite-run observations, not a universal
+reserve. Built-in TJPGD is disabled and the original 20-row display buffer remains.
+Active audio format/rate and 120-slot backlog are unchanged. UI interactions and
+continuous standby capture were not reduced to avoid concurrent work.
+
+Earlier R40-R52 failed qualification reports remain separate. In particular R52
+failed a real 17,058-byte static RX allocation; R53 changes only parser lifetime
+relative to that candidate and removes 6,984 bytes of handshake overlap. R48's
+smaller display-buffer watchdog experiment was rejected and reverted. No shared
+system SDK modification, global allocator replacement or permanent pool is used.
+
+Unverified: human voice-to-tool confirmation intent, actual new quoted-message
+POST/delivery, acoustic quality, physical key feel, arbitrary network churn and
+long-term fragmentation. Automatic tests sent no business messages. The user's
+single original reconnect has no contemporaneous trace and remains unattributed.
+
+Evidence: `build/device-checkpoint/assistant-controls-r53-native.json`, matching
+`.uart.log`, `ordering_audit`, `build/assistant-controls-r53-source-hashes.json`,
+`build/assistant-controls-r53-product-verified` and paired design ownership table.
+
+## Focused startup and QR UI checks (2026-11-08)
+
+The ordinary R62 APP builds and its merged-image layout verifies (2,254,256 APP
+bytes; SHA256 `32c09dd859cf0f3967c20f4c78c98fe76511bc122c8a7bbdcc3be6ef6f699a01`).
+Only affected UI paths were checked; the unrelated full matrix was not repeated.
+
+An isolated PassportSim fixture drives the production rendering functions without
+network/audio: two full-screen startup frames change, no header/footer pixels remain,
+the message shortcut uses the new wording, and BOT selection, BOT authorization and
+three XiaoZhi account states show one copy of each scan instruction/status. Test QR
+content decodes. The startup-to-QR transition explicitly restores top-left alignment.
+These eight screenshots prove rendering only; the fixture is never installed on a
+physical device and does not prove real authorization, capture or cloud behavior.
+The separate storage/authentication candidate remains under device qualification.
+
+The startup now draws an envelope logo rather than binary text. Focused host tests
+verify the 575ms boot arpeggio, sample bounds, four silent separators, termination
+and the success-sound switch. It generates into the existing 128-sample playback
+block, without another task, permanent PCM array or temporary heap allocation.
+Hardware audibility has not been checked during silent tests.
+
+R61's separate native run did not qualify: its old cold-cache preparation used
+a full visit with nested lookups and took about990 seconds. The measured root
+read then took1,528ms; four committed text-page reads peaked at543ms, without
+a watchdog fault, but subsequent HTTP requests failed before obtaining a status.
+This is not an overall PASS. The app/identity/font/table were restored safely.
+R63 replaces that diagnostic preparation with RAM locator/proof invalidation;
+host verification observes zero Flash IO and unchanged revision counters, followed
+by322 reads for the same cold fixture. Real authorization is now required before
+its device run can continue. The R62 logo/chime ordinary firmware remains built
+and UI-checked, rather than claimed as a fully accepted device release.
+
+## R64 targeted device checks after renewed authorization (2026-11-08)
+
+The user completed device authorization. Ordinary R62 then returned real chat and
+message HTTP200 responses; the first observed message request was slow (about76s
+between parser allocation and stream completion). Later requests were faster.
+This cold-load performance issue is not declared resolved by the checks below.
+
+R64 uses the R63 diagnostic with the current ordinary R62 as BOTH success/failure
+fallback. Authorization waiting must not restore the earlier R53 UI. The fixture
+skips the unrelated complete matrix and never transmits a business message.
+
+| Selected device check | Observed result |
+| --- | --- |
+| Selected message context while loading, quoted-draft target and activity renewal | PASS, same validated message target and refreshed activity |
+| Cold credential load, RAM-only cold preparation | 975ms; IDLE progressed, no watchdog fault |
+| Actual expired-access response and normal refresh | HTTP400 code99991668; refresh and full body retrieval pass in7410ms (682-byte body) |
+| Four random local pages of a12KiB fixture | 4/4 pass; maximum10ms |
+| Named Blue bot in the actual current group | Unique verified result; no real mention POST performed |
+| Deliberately cleared SDK fd_sets | Same connection rearmed after24ms |
+| Three cloud assistant turns, speech preemption, deferred-read resumption, capture retention and injected recovery | Selected checks pass; no unexpected watchdog/panic |
+| Final ordinary firmware | R62 SHA256 `32c09dd859cf0f3967c20f4c78c98fe76511bc122c8a7bbdcc3be6ef6f699a01`; binding, identity, partition and font retained; silent preferences retained |
+
+The legacy collector's overall result remains NOT PASS: its one unmet term was
+the pending-confirmation keepalive marker. That marker was not observed; no claim
+is made that this path passed, nor that the absence proves a transport failure.
+The separate targeted audit records the listed scope without overwriting that
+legacy result. Physical startup-sound audibility, natural voice intent leading
+to an actual quoted/mention send, and cold-load latency remain unverified or open.
+
+## R69 refresh/startup regression (2026-11-08)
+
+Build and merged-image layout verify. Ordinary APP:2,255,664 bytes, SHA256
+`99cf22c445826586c0012a6bdaa2062fcd0eac0458570a179fd9800604b90fec`.
+Only affected checks were run; no unrelated complete matrix is claimed.
+
+- Host live-preview merge checks pass: duplicate/older/deleted rejection, bounded
+  rows, follow-latest and preservation of a reader's selection.
+- Isolated rendering checks pass through both startup owners, initialization-logo
+  wait, cached home without the old startup footer, and existing QR transitions.
+  These are synthetic UI fixtures, not physical screenshots or network proof.
+- APP-only COM7 write/readback passes; MAC, full data-pool MD5, identity, font and
+  partition were checked and preserved before reboot. No timeout rollback exists.
+- Native logs show bound1/auth_request0 and cached conversations ready at7697ms
+  after boot, ahead of draft indexing and network list fetch. Real chat/preview
+  requests returnHTTP200; enrichment stores zero full text bodies.
+
+Natural incoming-message latency under use and post-send assistant resumption
+still need a human device check. The connection handoff remains intentional;
+this iteration does not claim uninterrupted voice connectivity during sending.
+
+## R72 BOT-authorization preparation (2026-11-08)
+
+The reported sequence is supported by source: the settings action queued a durable
+authorization request then restarted into the ordinary onboarding splash; it had
+not cancelled the existing read first. R72 changes that UI reentry path.
+
+- Build/image verification passes; ordinary APP2,256,560 bytes, SHA256
+  `03e6680edb6a42055bb4fc356b6a44cdf6d856f6f60eae9730388be6d2f66fb0`.
+- Host policy checks pass for warm-software entry, one-shot consumption, cold reset
+  and corrupted tag/complement rejection.
+- The R71 isolated gallery exercised preparation-to-decodable-QR and pre-restart
+  settings preparation with no ASCII logo or old login wording. R72 additionally
+  clears redundant footer text and captures that condition under the UI lock;
+  this text-only follow-up was reviewed without repeating unrelated UI scenarios.
+- R72 APP-only device write/readback passes; identity, entire pool, font and table
+  remain unchanged by flashing. Native startup reports bound1/auth_request1 and
+  reaches a real authorization QR. That request was already opened by the user.
+
+The physical settings click through its software reset still needs a user check.
+Polling HTTP400 alone is not treated as evidence that the existing grant was revoked.
+No new consent was performed, no old credentials were cleared for this test, and
+waiting does not roll back the ordinary firmware.
+
+## R74 cold-list and conversation-boundary fix, qualified by R75 (2026-11-08)
+
+Build: PASS, ordinary APP 2,257,616 bytes; SHA256
+3f2eb22af6b677e041098d1906c3a47db11c1665167cf57822b76ea665806a27.
+Only affected checks were run; no unrelated full matrix was repeated.
+
+The prior unchanged-firmware capture compared eight rows/six text bodies/5,741
+response bytes: foreground body storage took7,748ms to list readiness, while later
+preview-only reconciliation took1,272ms. First body arrival was1,355/1,246ms.
+Streaming-feed time includes network and storage callbacks, so those logs do not
+isolate every millisecond of Flash cost.
+
+| Check | Result |
+| --- | --- |
+| Host parser, normal/pressure/error | Preview pagination and cursor retention, valid/zero/malformed/duplicate revisions and unresolved mentions pass; existing2MiB preview and120KB full-store callback fixtures pass in a fixed7,000-byte parser context |
+| Host cache and navigation | Exact-revision body reuse, changed/unknown/deleted/wrong-ID rejection; ordinary, final-row, final-page and empty-list boundaries pass; existing model/page tests pass |
+| Native preview list | Two eight-row samples ready in1,317/1,322ms, stored0; total calls including optional snapshot work1,966/1,839ms |
+| Native on-demand body and local read |297-byte body fetched/committed in2,036ms; initial cached page5ms |
+| Native persistent body link | RAM view dropped, actual framed cache reloaded in40ms with the same body ID; subsequent preview retained the body reference and local page read8ms |
+| Native next conversation page | Actual navigation handler, asynchronous cache owner and network-miss owner completed the next page; server_has_next1 |
+| Native page failure recovery | A missing current-cache key in diagnostic RAM failed the page operation, cleared loading and preserved the list; navigation remained usable |
+| Final device | Ordinary R74 written/read back; binding retained, identity/table/font preserved; no panic/watchdog; muted fixture and zero business POSTs |
+
+The first R74 diagnostic fixture incorrectly waited only on the main work queue
+and reported page failure before the cache worker could finish. That failed
+record is preserved. R75 corrected the fixture to wait for both owners, without
+changing the qualified production code; all selected checks then passed.
+
+The probe used a temporary, hash-guarded source override for its second build.
+Production sources were restored exactly before device execution. Generated
+development artifacts were also restored to the frozen ordinary bundle. Native
+measurements are samples, not a bound on every message size or network. Natural
+button feel and active-assistant concurrency were not rerun as a full matrix.
+
+
+### R77: offline errors preserve navigation and their actual cause
+
+- Build: PASS, verified ordinary APP 2,258,480 bytes, SHA256 `e72887886ae9d8befe3070afa9ea320fdf3c2beb880368ce27b5b087cae7136e`, bundle `build/ui-core-r77-product-verified`.
+- Host tests: PASS, failed-load navigation with retained/current versus stale/other chat rows, Down, double Down, Back; known/unknown Wi-Fi reasons, user-disconnect precedence, connection recovery and shutdown-event preservation. Repository and storage-boundary checks pass.
+- Device tests: PASS for the affected offline paths only. The attached device actually reported repeated reason 201; the application then stopped the driver (reason 36). R77 retained reason 201, exercised the real failed-message worker and button handlers, and verified failed pagination releases loading and retains navigation. `build/device-checkpoint/offline-r77-native.json` has all seven checks, including `no_ap=1`; raw UART is local only.
+- The preceding R76 diagnostic proved navigation but recorded `no_ap=0`: a local stop event erased the earlier reason. It is retained as partial evidence, not the final cause-preservation acceptance.
+- Ordinary R77 restored with APP readback, identity/table/font and data-pool write preservation, bound=1/auth_request=0; no business POST or audible test. Diagnostic hooks and RAM-only fixture rows are absent from ordinary firmware.
+- Unverified: online message fetching after the access point becomes available, natural button feel and the physical red-text presentation. No unrelated full matrix was repeated.
+
+
+### R78: saved-network fallback and independent local listing
+
+- Build and focused host tests pass. Ordinary APP 2,259,776 bytes, SHA256 `46205132874d8d5564ed367fbc519e740b46e6c93e23018a5d9f3335d2635d0e`, bundle `build/ui-core-r78-product-verified`.
+- Saved names now use the cache-worker queue, independent of the business worker's connection waits; an unfinished read is labelled loading rather than an empty saved list.
+- Automatic join begins with the active saved entry, caps attempts at 8 seconds and uses one caller deadline. A RAM cursor continues later entries across failed batches. Successful connection updates the existing active choice; explicit offline/cancellation bypasses automatic join. No additional password cache is retained.
+- `build/device-checkpoint/wifi-r78-native.json` passes local listing, fallback, cancellation, explicit offline, recovery and saved-catalog preservation. The actual business worker waited while the cache worker read two names in 2ms; state was observed ready at 49ms. This is publication timing, not a measured physical LCD frame.
+- Fault injection changed only the first candidate in RAM to a nonexistent SSID (actual reason 201). The second attempt reused the original active network credentials, without changing stored passwords. The real radio reconnected in 12,238ms total; this verifies retry control and radio recovery, not availability of every remembered AP.
+- Identity/table/font and pool preservation across APP writes are checked; no business messages or audible tests. Ordinary firmware excludes injection and hooks.
+- The reported slow opening of Doubao has not been reproduced in full. The read-only R78 live capture contains a 5-row preview refresh in 1,191ms, but began after the original opening. `MESSAGE_OPEN` and `MESSAGE_LOAD_BEGIN` markers were added for the next reproduction. Online opening latency and physical interaction remain pending.
+
+
+### R79: About only, then an authorized clean reinstall
+
+- Build: PASS, version `0.2.0-r79`, APP 2,260,032 bytes, SHA256 `7e58f7162cb265a38fab5c1fda223c997c3f9717f76f087b08654a77b4fdbb02`, bundle `build/ui-core-r79-product-verified`. `version.txt` drives both ESP-IDF metadata and the About display. The first build failed for the missing explicit `esp_app_format` dependency; the dependency was added and the build rerun successfully.
+- Host test: About navigation only, entry/read-only actions/back focus/adjacent return item PASS. No unrelated functional matrix.
+- Device test: About only PASS: actual Settings entry, title, author `cexer@qq.com`, exact metadata version, visible content within the header/footer bounds, and Back returning focus to About. Report `build/device-checkpoint/about-r79-clean-install.json`. This checks LVGL output/geometry; no physical photograph or font-quality judgement.
+- After that pass, the user-authorized clean reinstall erased and verified blank the APP slot `0x10000+0x330000`, NVS `0x9000+0x6000`, legacy cache `0x360000+0x10000`, and shared pool `0x370000+0x100000`; it then wrote and readback-verified ordinary R79. Bootloader/table, PHY, board identity and font regions were preserved. Saved Wi-Fi, BOT credentials/tokens, drafts, caches and local preferences were intentionally discarded.
+- The device is left in download mode without a final reset, to keep testing silent and leave the first clean boot to the user. No diagnostic code remains installed. First provisioning, BOT selection and authorization have not been exercised after this wipe. Reboot is required.
+
+
+### R80 power policy: corrected device gate passed
+
+- Build: PASS for corrected 0.2.1-r80, APP 2,280,912 bytes, SHA256 `c6e80a139e90099c83d320dcbe7c4a92673a8ae328e1b234f275c00538a87382`, bundle `build/ui-core-r80-product-verified`. PM, tickless idle and USB-connected sleep protection are enabled.
+- Host tests: PASS, policy defaults/mode combinations/thresholds/audio-work guards/invalid records/prewarm wrap; real-manager wake consumption, 1,000 unchanged ticks without Wi-Fi churn, retry backoff and offline behavior; settings persistence/reopen/corruption and the neighboring About navigation.
+- First device gate: FAIL. Actual UI/persistence passed; at 120,300ms screen off, application CPU saving and Wi-Fi MIN_MODEM passed; wake consumption and forced On/Off passed. Serial output then stopped during a saving-mode HTTPS test. The SDK configuration had USB-connected sleep protection disabled; ESP32-C3 USB Serial/JTAG cannot survive Light-sleep in that configuration. The bounded monitor timed out, and the attempted ordinary-APP restore failed with Windows device error 31. Exact failed bundles and UART are retained in `build/power-r80-usb-failure`.
+- Corrective configuration: `CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION=y`. The SDK holds a No-Light-Sleep lock while attached to a USB host and releases it after disconnect, without a new application task. A scoped restart of this exact USB device was denied by Windows; no other device or hub was restarted.
+- Corrected USB2 device gate: PASS. Actual four-row UI and persistence; real idle 120,301ms, first-key wake consumption, forced modes and saving-mode HTTPS; real prewarm expiry 60,002ms with audio protection and no passive rearm; page-entry cache/online refresh; 20 seconds foreground-only with zero background requests. No panic/watchdog was captured. Report: `build/device-checkpoint/power-focused-r80-usb2-native.json`, with matching UART log. Tests were silent and sent no business messages.
+- The corrected ordinary R80 APP was installed and read-back verified; temporary probe is inactive. Bootloader, partition table, identity, font and data ranges were verified across APP writes; binding remained present. Left in download mode without reboot to keep testing silent; a physical restart is needed to run the ordinary build.
+- Startup observation: the recovery controller deliberately resets after diagnostic flashing, so a second startup was expected during this recovery. The earlier user-observed frozen first start was not separately captured and cannot be declared crash-free. In the captured corrected boot, configuration check completed at 10,721ms and cached conversations became ready at 14,175ms. This bounds the local initialization/cache wait, not a measured animation-duration constant; its finer breakdown remains unverified.
+- Unverified: electrical current, battery endurance, actual battery-mode Light-sleep residency and natural wake-key feel. USB-host protection intentionally prevents Light-sleep while attached; application CPU/Wi-Fi policy transitions are verified separately.

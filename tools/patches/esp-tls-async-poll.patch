@@ -1,0 +1,29 @@
+--- a/esp_tls.c
++++ b/esp_tls.c
+@@ -57,6 +57,8 @@
+ 
+ #ifdef ESP_PLATFORM
+ #include <esp_log.h>
++#define FEISHU_TLS_POLL_TRACE(text) ESP_LOGI("feishu_tls_poll", "%s", text)
++#include "feishu_tls_poll.h"
+ #else
+ #define ESP_LOGD(TAG, ...) //printf(__VA_ARGS__);
+ #define ESP_LOGE(TAG, ...) printf(__VA_ARGS__);
+@@ -497,8 +499,15 @@
+ 
+             /* In case of non-blocking I/O, we use the select() API to check whether
+                connection has been established or not*/
+-            if (select(tls->sockfd + 1, &tls->rset, &tls->wset, NULL,
+-                       cfg->timeout_ms>0 ? &tv : NULL) == 0) {
++            int poll_ready = feishu_tls_poll_socket(tls->sockfd, &tls->rset, &tls->wset,
++                cfg->timeout_ms>0 ? &tv : NULL, select);
++            if (poll_ready < 0) {
++                ESP_INT_EVENT_TRACKER_CAPTURE(tls->error_handle, ESP_TLS_ERR_TYPE_SYSTEM, errno);
++                ESP_INT_EVENT_TRACKER_CAPTURE(tls->error_handle, ESP_TLS_ERR_TYPE_ESP, ESP_ERR_ESP_TLS_FAILED_CONNECT_TO_HOST);
++                tls->conn_state = ESP_TLS_FAIL;
++                return -1;
++            }
++            if (poll_ready == 0) {
+                 ESP_LOGD(TAG, "select() timed out");
+                 return 0;
+             }

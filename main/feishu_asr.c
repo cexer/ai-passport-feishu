@@ -1,4 +1,7 @@
+#include "feishu_power_policy.h"
+#include "feishu_power.h"
 #include "feishu_asr.h"
+#include "feishu_assistant.h"
 #include "feishu_asr_batch.h"
 #include "feishu_adpcm.h"
 #include "feishu_http.h"
@@ -8,6 +11,7 @@
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -39,17 +43,20 @@ static unsigned s_audio_primed;
 static struct {
     TaskHandle_t task;
     SemaphoreHandle_t done;
-    atomic_bool wanted,claim,running;
+    atomic_bool wanted,claim,running,expired;
     atomic_uint primed;
     bool transferred;
     esp_err_t error;
 } s_warm;
+static atomic_uint s_feedback_quiet_until;
+static atomic_bool s_feedback_quiet_active;
 static void warm_task(void *unused)
 {
-    (void)unused;int16_t pcm[320];
+    (void)unused;int16_t pcm[320];uint32_t started=(uint32_t)(esp_timer_get_time()/1000);
     esp_err_t err=bsp_audio_init();
     if(err==ESP_OK){bsp_audio_set_volume(0);err=bsp_audio_set_format(16000,16,1);}
     while(err==ESP_OK && atomic_load(&s_warm.wanted) && !atomic_load(&s_warm.claim) && feishu_network_connected()) {
+        if(feishu_power_prewarm_expired((uint32_t)(esp_timer_get_time()/1000),started)){atomic_store(&s_warm.expired,true);break;}
         err=bsp_audio_read(pcm,sizeof(pcm));
         if(err==ESP_OK && atomic_load(&s_warm.primed)<ASR_PRIME_MS)atomic_fetch_add(&s_warm.primed,20);
     }
@@ -73,7 +80,11 @@ static unsigned warm_join(bool claim)
 }
 esp_err_t feishu_asr_prepare(bool enable)
 {
-    if(!enable){(void)warm_join(false);return ESP_OK;}
+    if(!enable){(void)warm_join(false);atomic_store(&s_warm.expired,false);return ESP_OK;}
+    if(atomic_load(&s_warm.expired)){
+        if(s_warm.task && !atomic_load(&s_warm.running))(void)warm_join(false);
+        return ESP_OK; /* A refresh must not rearm an idle focus. */
+    }
     if(s_warm.task && !atomic_load(&s_warm.running))(void)warm_join(false);
     atomic_store(&s_warm.wanted,true);
     if(s_warm.task)return ESP_OK;
@@ -88,8 +99,44 @@ esp_err_t feishu_asr_prepare(bool enable)
     ESP_LOGI(TAG,"AUDIO_PREWARM started=1 heap=%u",(unsigned)esp_get_free_heap_size());return ESP_OK;
 }
 void feishu_asr_prepare_cancel(void) {atomic_store(&s_warm.wanted,false);}
+bool feishu_asr_prepare_expired(void){return atomic_load(&s_warm.expired);}
 bool feishu_asr_prepare_ready(void)
 {return atomic_load(&s_warm.running) && atomic_load(&s_warm.primed)>=ASR_PRIME_MS;}
+/* Feedback shares the existing audio owner. A live assistant never changes
+ * format or closes I2S; optional prewarming is joined and resumed with its
+ * accumulated settling time rather than adding another two-second delay. */
+esp_err_t feishu_asr_feedback(feishu_sound_t kind,bool live_owner,bool keep_warm)
+{
+    unsigned count=feishu_feedback_samples(kind);if(!count)return ESP_ERR_INVALID_ARG;
+    bool had_warm=!live_owner && s_warm.task!=NULL && !atomic_load(&s_warm.expired);
+    unsigned primed=!live_owner ? warm_join(true):0;
+    esp_err_t err=ESP_OK;int16_t pcm[128]={0};
+    if(!live_owner){err=bsp_audio_init();if(err==ESP_OK)err=bsp_audio_set_format(16000,16,1);}
+    if(err==ESP_OK){
+        if(live_owner && kind==FEISHU_SOUND_KEY){atomic_store(&s_feedback_quiet_until,(unsigned)(esp_timer_get_time()/1000)+40);atomic_store(&s_feedback_quiet_active,true);}
+#ifdef FEISHU_ASSISTANT_AUTOTEST
+        /* Automated night runs exercise the driver without audible output. */
+        bsp_audio_set_volume(0);
+#else
+        bsp_audio_set_volume(60);
+#endif
+        for(unsigned start=0;start<count && err==ESP_OK;start+=128){
+            unsigned n=count-start;if(n>128)n=128;
+            for(unsigned i=0;i<n;++i)pcm[i]=feishu_feedback_sample(kind,start+i);
+            err=bsp_audio_write(pcm,n*sizeof(*pcm));
+        }
+        memset(pcm,0,sizeof(pcm));if(err==ESP_OK)err=bsp_audio_write(pcm,sizeof(pcm));
+        vTaskDelay(pdMS_TO_TICKS(100));bsp_audio_set_volume(0);
+    }
+    if(!live_owner){
+        if(err==ESP_OK && had_warm && keep_warm){
+            err=feishu_asr_prepare(true);
+            if(err==ESP_OK)atomic_store(&s_warm.primed,primed);
+            else bsp_audio_deinit();
+        } else bsp_audio_deinit();
+    }
+    memset(pcm,0,sizeof(pcm));return err;
+}
 #ifdef FEISHU_VOICE_AUTOTEST
 #include "voice_autotest_config.h"
 #endif
@@ -397,6 +444,13 @@ finished:
 }
 #ifdef FEISHU_ASR_XIAOZHI
 #include "feishu_xiaozhi.inc"
+#ifdef FEISHU_ASSISTANT_AUTOTEST
+#include "assistant_fixture.h"
+#ifdef FEISHU_COLLAB_AUTOTEST
+#include "assistant_collaboration_fixture.h"
+#endif
+#endif
+#include "feishu_assistant_session.inc"
 #ifdef FEISHU_MCP_DIAGNOSTIC
 #include "../tools/mcp_probe/device_probe.inc"
 #endif
@@ -436,7 +490,7 @@ esp_err_t feishu_asr_record(feishu_api_session_t *session,volatile bool *stop,vo
     if(err==ESP_OK) {
         s_audio_primed=warm_join(true);
 #ifdef FEISHU_ASR_XIAOZHI
-        err=feishu_asr_record_xiaozhi(stop,cancel,elapsed,recognition,capacity,draft,preparing);
+        err=feishu_asr_record_xiaozhi(stop,cancel,elapsed,recognition,capacity,draft,preparing,NULL);
 #else
         err=feishu_asr_record_feishu(session,stop,cancel,elapsed,recognition,capacity,draft,preparing);
 #endif
@@ -445,6 +499,63 @@ esp_err_t feishu_asr_record(feishu_api_session_t *session,volatile bool *stop,vo
     if(s_audio_release)s_audio_release();
     return err;
 }
+esp_err_t feishu_assistant_run(volatile bool *stop,volatile bool *cancel,
+    volatile unsigned *elapsed,volatile bool *preparing,const feishu_assistant_hooks_t *hooks)
+{
+#ifdef FEISHU_ASR_XIAOZHI
+    if(!stop || !cancel || !elapsed || !hooks || !hooks->execute || hooks->volume>100 || (hooks->silence_seconds!=0 && (hooks->silence_seconds<2 || hooks->silence_seconds>5)))return ESP_ERR_INVALID_ARG;
+    xiao_assistant_t *a=calloc(1,sizeof(*a));if(!a)return ESP_ERR_NO_MEM;
+    a->hooks=hooks;a->cancel=cancel;
+    esp_err_t err=s_audio_acquire ? s_audio_acquire():ESP_OK;
+    char recognition[FEISHU_REPLY_MAX]={0};
+    if(err==ESP_OK) {
+        s_audio_primed=warm_join(true);
+        err=hooks->continuous ? xiao_assistant_session(stop,cancel,elapsed,preparing,a):
+            feishu_asr_record_xiaozhi(stop,cancel,elapsed,recognition,sizeof(recognition),NULL,preparing,a);
+        s_audio_primed=0;
+    }
+    /* The BSP TX DMA holds up to 60 ms at 24 kHz. Let the final queued speech
+     * drain on normal completion; cancellation stops without this delay. */
+    if(err==ESP_OK && a->audio && !*cancel)vTaskDelay(pdMS_TO_TICKS(80));
+    feishu_xiao_player_close(&a->player);
+    free(a->request);a->request=NULL;
+    if(a->audio){bsp_audio_deinit();ESP_LOGI(TAG,"ASSISTANT_CODEC_CLOSE");}
+    ESP_LOGI(TAG,"ASSISTANT_DONE result=%d cloud_calls=%u audio_frames=%u heap=%u stack=%u minimum=%u",err,a->calls,a->audio_frames,
+        (unsigned)esp_get_free_heap_size(),(unsigned)uxTaskGetStackHighWaterMark(NULL),(unsigned)esp_get_minimum_free_heap_size());
+    memset(a,0,sizeof(*a));free(a);
+    if(s_audio_release)s_audio_release();
+    if(preparing)*preparing=false;
+    return err;
+#else
+    (void)stop;(void)cancel;(void)elapsed;(void)preparing;(void)hooks;
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
+}
 #ifdef FEISHU_VOICE_AUTOTEST
 #include "voice_autotest_driver.inc"
+#endif
+#ifdef FEISHU_ASSISTANT_AUTOTEST
+esp_err_t feishu_assistant_autotest_run(volatile bool *stop,volatile bool *cancel,
+    volatile unsigned *elapsed,volatile bool *preparing,const feishu_assistant_hooks_t *hooks,unsigned test_case)
+{
+    if(test_case>=8)return ESP_ERR_INVALID_ARG;
+    unsigned fixture=test_case<3 ? test_case:test_case==5 ? 4:test_case==6 ? 3:0;
+#ifdef FEISHU_DRAFT_RAM_AUTOTEST
+    fixture=2;
+#endif
+    memset(&voice_probe,0,sizeof(voice_probe));
+    voice_probe.active=true;voice_probe.pcm=assistant_fixtures[fixture];voice_probe.size=assistant_fixture_sizes[fixture];
+#ifdef FEISHU_COLLAB_AUTOTEST
+    voice_probe.pcm=assistant_collaboration_fixture;voice_probe.size=sizeof(assistant_collaboration_fixture);
+#endif
+    voice_probe.stop_ms=(unsigned)(voice_probe.size/32);voice_probe.stop=stop;voice_probe.cancel=cancel;
+    if(test_case==3)voice_probe.cancel_ms=400;
+    if(test_case==4)voice_probe.fail_ms=400;
+    feishu_assistant_hooks_t options=*hooks;
+#ifndef FEISHU_DRAFT_RAM_AUTOTEST
+    if(test_case==7){options.continuous=true;options.silence_seconds=2;}
+#endif
+    esp_err_t err=feishu_assistant_run(stop,cancel,elapsed,preparing,&options);
+    voice_probe.active=false;return err;
+}
 #endif

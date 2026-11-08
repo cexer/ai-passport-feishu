@@ -121,10 +121,21 @@ static void test_compose_shortcut(void)
         assert(feishu_nav_handle(&nav,FEISHU_NAV_OK)==FEISHU_NAV_START_RECORDING);
     }
     feishu_nav_t nav={.page=FEISHU_PAGE_SETTINGS,.settings_index=FEISHU_SETTING_XIAOZHI};
+    assert(feishu_nav_handle(&nav,FEISHU_NAV_OK)==FEISHU_NAV_NONE && nav.page==FEISHU_PAGE_XIAOZHI_SETTINGS);
+    assert(feishu_nav_handle(&nav,FEISHU_NAV_DOWN)==FEISHU_NAV_NONE && nav.settings_index==1);
+    assert(feishu_nav_handle(&nav,FEISHU_NAV_OK)==FEISHU_NAV_NONE && nav.page==FEISHU_PAGE_ASSISTANT_SETTINGS);
+    assert(feishu_nav_handle(&nav,FEISHU_NAV_BACK)==FEISHU_NAV_NONE && nav.page==FEISHU_PAGE_XIAOZHI_SETTINGS);
+    assert(feishu_nav_handle(&nav,FEISHU_NAV_UP)==FEISHU_NAV_NONE && nav.settings_index==0);
     assert(feishu_nav_handle(&nav,FEISHU_NAV_OK)==FEISHU_NAV_CHECK_XIAOZHI && nav.page==FEISHU_PAGE_XIAOZHI);
     assert(feishu_nav_handle(&nav,FEISHU_NAV_COMPOSE)==FEISHU_NAV_NONE && nav.page==FEISHU_PAGE_XIAOZHI);
     assert(feishu_nav_handle(&nav,FEISHU_NAV_OK)==FEISHU_NAV_CHECK_XIAOZHI);
+    assert(feishu_nav_handle(&nav,FEISHU_NAV_BACK)==FEISHU_NAV_NONE && nav.page==FEISHU_PAGE_XIAOZHI_SETTINGS);
     assert(feishu_nav_handle(&nav,FEISHU_NAV_BACK)==FEISHU_NAV_NONE && nav.page==FEISHU_PAGE_SETTINGS);
+    nav.settings_index=FEISHU_SETTING_ASSISTANT;
+    assert(feishu_nav_handle(&nav,FEISHU_NAV_OK)==FEISHU_NAV_ENTER_ASSISTANT && nav.page==FEISHU_PAGE_SETTINGS);
+    nav.settings_index=FEISHU_SETTING_SOUNDS;
+    assert(feishu_nav_handle(&nav,FEISHU_NAV_OK)==FEISHU_NAV_NONE && nav.page==FEISHU_PAGE_SOUND_SETTINGS);
+    nav.page=FEISHU_PAGE_SETTINGS;
     nav.settings_index=FEISHU_SETTING_RETURN;
     assert(feishu_nav_handle(&nav,FEISHU_NAV_OK)==FEISHU_NAV_NONE && nav.page==FEISHU_PAGE_CHATS);
 }
@@ -159,9 +170,15 @@ static void test_global_drafts(void)
     feishu_nav_t nav={.page=FEISHU_PAGE_SETTINGS,.settings_index=FEISHU_SETTING_DRAFTS};
     assert(feishu_nav_handle(&nav,FEISHU_NAV_OK)==FEISHU_NAV_LIST_DRAFTS);
     assert(nav.page==FEISHU_PAGE_DRAFTS && nav.draft_manager && nav.draft_count==0);
-    assert(feishu_nav_handle(&nav,FEISHU_NAV_OK)==FEISHU_NAV_NONE);
+    assert(feishu_nav_handle(&nav,FEISHU_NAV_OK)==FEISHU_NAV_NONE && nav.page==FEISHU_PAGE_CONFIRM && nav.confirm_action==4);
+    assert(feishu_nav_handle(&nav,FEISHU_NAV_BACK)==FEISHU_NAV_NONE && nav.page==FEISHU_PAGE_DRAFTS);
     nav.draft_count=4;
     for(unsigned i=0;i<8;++i)feishu_nav_handle(&nav,FEISHU_NAV_DOWN);
+    assert(nav.draft_index==4);
+    assert(feishu_nav_handle(&nav,FEISHU_NAV_OK)==FEISHU_NAV_NONE && nav.page==FEISHU_PAGE_CONFIRM);
+    assert(feishu_nav_handle(&nav,FEISHU_NAV_OK)==FEISHU_NAV_CLEAR_DRAFTS);
+    assert(feishu_nav_handle(&nav,FEISHU_NAV_UP)==FEISHU_NAV_NONE && nav.page==FEISHU_PAGE_DRAFTS);
+    feishu_nav_handle(&nav,FEISHU_NAV_UP);
     assert(nav.draft_index==3);
     assert(feishu_nav_handle(&nav,FEISHU_NAV_OK)==FEISHU_NAV_OPEN_DRAFT);
     assert(nav.page==FEISHU_PAGE_DRAFTS); /* Worker reads durable state before review. */
@@ -179,6 +196,12 @@ static void test_global_drafts(void)
 }
 int main(void)
 {
+    feishu_message_t echo_rows[2]={{.message_id="om_old"},{.message_id="om_previous"}},ack={.message_id="om_ack",.mine=true};
+    size_t echo_count=2;
+    assert(!feishu_message_merge_ack(echo_rows,&echo_count,2,&ack));
+    assert(echo_count==2 && !strcmp(echo_rows[0].message_id,"om_previous") && !strcmp(echo_rows[1].message_id,"om_ack"));
+    assert(feishu_message_merge_ack(echo_rows,&echo_count,2,&ack) && echo_count==2);
+
     assert(feishu_focus_step(9,12,1,false)==10);
     assert(feishu_focus_step(10,12,-1,false)==9);
     assert(feishu_focus_step(11,12,-1,false)==10);
@@ -260,6 +283,18 @@ int main(void)
     assert(!strcmp(preview,"已有前缀..."));
     feishu_text_preview(preview,1,"中文",true,22,2);assert(!preview[0]);
     feishu_text_preview(preview,sizeof(preview),"正常恢复",false,22,2);assert(!strcmp(preview,"正常恢复"));
+    /* Volume is an inline third item, not account or network navigation. */
+    feishu_nav_t volume_nav={0};volume_nav.page=FEISHU_PAGE_XIAOZHI_SETTINGS;
+    assert(feishu_nav_handle(&volume_nav,FEISHU_NAV_DOWN)==FEISHU_NAV_NONE);
+    assert(volume_nav.settings_index==1);
+    assert(feishu_nav_handle(&volume_nav,FEISHU_NAV_DOWN)==FEISHU_NAV_NONE);
+    assert(volume_nav.settings_index==2);
+    assert(feishu_nav_handle(&volume_nav,FEISHU_NAV_OK)==FEISHU_NAV_NONE);
+    assert(volume_nav.page==FEISHU_PAGE_XIAOZHI_SETTINGS);
+    assert(feishu_nav_handle(&volume_nav,FEISHU_NAV_BACK)==FEISHU_NAV_NONE && volume_nav.page==FEISHU_PAGE_SETTINGS);
+    volume_nav.page=FEISHU_PAGE_XIAOZHI_SETTINGS;volume_nav.settings_index=2;
+    assert(feishu_nav_handle(&volume_nav,FEISHU_NAV_DOWN)==FEISHU_NAV_NONE && volume_nav.settings_index==3);
+    assert(feishu_nav_handle(&volume_nav,FEISHU_NAV_OK)==FEISHU_NAV_NONE && volume_nav.page==FEISHU_PAGE_XIAOZHI_SETTINGS);
     test_unread();
     test_utf8_copy();
     test_navigation();

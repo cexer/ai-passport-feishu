@@ -501,6 +501,18 @@ int feishu_data_stat(feishu_data_t *s,int64_t id,const char *key,feishu_data_obj
     return rc;
 }
 
+int feishu_data_set_protected(feishu_data_t *s,int64_t id,bool protect)
+{
+    if(!s || !s->db || id<=0)return FEISHU_DATA_MISUSE;
+    RESTORE_TX(s);
+    sqlite3_stmt *q=NULL;int rc=prepare(s,"UPDATE objects SET protected=? WHERE id=? AND committed IN(1,2)",&q);
+    if(rc==SQLITE_OK){
+        sqlite3_bind_int(q,1,protect);sqlite3_bind_int64(q,2,id);rc=data_step(q);
+        if(rc==SQLITE_DONE)rc=sqlite3_changes(s->db) ? SQLITE_OK:SQLITE_NOTFOUND;
+    }
+    sqlite3_finalize(q);return rc;
+}
+
 int feishu_data_read(feishu_data_t *s, int64_t id, unsigned sequence, uint8_t *data, size_t capacity, size_t *size)
 {
     if (!s || !s->db || id<=0 || !data || !size || sequence>INT_MAX) return SQLITE_MISUSE;

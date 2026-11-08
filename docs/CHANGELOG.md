@@ -6,6 +6,55 @@
 
 ## Unreleased
 
+- Add versioned `release/` BIN archives and `tools/prepare_release.py` with layout, source and SHA256 checks.
+
+- Add Power saving settings: 2–10 minute screen-off timeout (default 2), CPU and Wi-Fi On/Off/Auto modes (Auto after two idle minutes), and foreground/background/automatic refresh (foreground-only by default). Wake keys are consumed safely; voice/audio and active operations retain power locks. Microphone prewarming expires after one minute without being rearmed by passive refresh.
+
+- Add Settings → About with author `cexer@qq.com` and the firmware version from ESP-IDF application metadata; version this build as `0.2.0-r79`.
+
+- Read the saved Wi-Fi list on the local-cache worker and show loading explicitly. Automatic connection rotates through saved networks with an 8-second attempt budget and caller-wide deadline; later entries continue on the next batch, and intentional disconnect remains offline. Add message-open timing markers for diagnosis.
+
+- Keep message-load failures on the navigable message page, retain same-conversation rows and discard stale cross-conversation rows. Show specific Wi-Fi failures (including missing access points) in message, conversation-page and initialization errors instead of a generic load failure.
+
+- Show conversation message lists and older pages from bounded previews without synchronous body storage; fetch full text on open and retain valid body references in the framed page cache. Reuse cached bodies only for an exact known message revision. Short Down at the last conversation row now opens the next page, or reports the final page.
+
+- Treat a settings-triggered BOT authorization restart as authorization preparation: cancel optional reads, omit duplicate loading text, and skip the cold-boot artwork/chime using a one-shot RAM hint. Normal power-on branding and durable credential checks remain intact.
+
+- Keep the envelope startup screen through application initialization, show cached conversations before draft indexing, poll the visible message page with lightweight latest-message previews, and resume the enabled assistant before optional post-send history refresh. Sending still temporarily releases the voice connection to avoid a TLS memory peak.
+
+- Replace the return-to-messages shortcut wording, remove repeated QR scan instructions, and use a green ASCII envelope logo with orbiting sparks and a 575ms electronic rising arpeggio, without header/footer chrome (controlled by the success-sound switch). Reset label alignment when leaving the animation so QR captions remain visible.
+
+- Reduce simultaneous listening/read peaks with response-lifetime GET RX, deferred/released request scratch and body-time parser allocation; preserve active audio capacity and UI interactions. Full R53 native regression passes, without claiming indefinite stability.
+
+- Recognize both SDK and errno EAGAIN results while polling HTTP response headers; preserve real errors and the same request without replay.
+
+- Add later-turn voice send confirmation with revision/duplicate protection, true message reply targets in collaborative editing, and persisted assistant/sound settings tools plus settings-page navigation.
+
+- Execute assistant page-opening tools before acknowledging their result; retain conversation content while loading, support the current conversation as the collaborative-editor recipient, and retire stale dictation pages during global assistant takeover.
+
+- Keep the existing microphone task/queue across ordinary reads; prioritize detected speech over cancellable GET work, sample battery without capture teardown, and coalesce passive refresh to 30 seconds with capture retained.
+
+- Keep the draft and recipient visible while sending; resume the same assistant activation without another greeting or timer reset. Request concise replies during protocol initialization and distinguish silent maintenance from an actual command.
+
+- Fix assistant activation failure from idle audio backlog and UI repaint/lock contention without expanding the audio pool; retain onset preroll, isolate audio-backpressure errors, and allow a bounded two-second binary write without ambiguous replay.
+
+- Repair a persistent provisioning trap with one-shot portal requests and remembered-network retry; preserve business OK during assistant listening, add persistent XiaoZhi volume and two-second defaults, move the badge beside battery, and show an animated startup screen with optional electronic feedback.
+
+- Keep the assistant active across business pages, expose current-page/draft MCP tools and real structured mentions, add independent feedback switches, and unify full-width separators and the persistent breathing status badge. Reduce active background fetches to previews and release reply decoding before nested HTTPS.
+
+- Add revision-checked collaborative draft editing and one volatile undo snapshot; preserve recipient/reply, keep assistant prose out of outgoing text, and require explicit send confirmation.
+
+- Keep one global draft, allow complete short messages to send from volatile RAM after storage failure, show the immutable recipient in review, and expose explicit delete/clear actions.
+### Continuous assistant controls
+
+- Highlight assistant entry, double-OK shortcut, automatic greeting and continuous listening.
+- Add XiaoZhi account/assistant subpages, boot preference, silence or OK submission.
+- Preserve physical send confirmation and phase-separated audio memory.
+
+
+
+- Add an experimental XiaoZhi assistant entry separate from ordinary dictation. Advertise bounded MCP tools for conversation lookup, latest-message previews, deferred navigation and device-confirmed drafts. Consume negotiated Opus reply audio with bounded packet/PCM buffers and release it after each voice turn. Message announcement work is paused; it is not part of this assistant path.
+
 - Keep Add network and manual provisioning fixed below the Wi-Fi list with whitespace separation and default focus on Add. Add per-network Connect, Disconnect, Forget and Set password actions, explicit empty-list persistence, rollback using live credentials after a bad saved-password edit, and two-way double-click focus shortcuts alongside ordinary list/action boundary navigation. Include page-owned state in repaint detection so focus and editor changes render immediately.
 
 - Add network settings with up to ten remembered Wi-Fi profiles, nearby-network selection, a clear-text password keyboard and a phone provisioning entry. Device-side switching commits only after connection succeeds and attempts the previous network on failure. Use BOT wording throughout the account selection/authorization screens.

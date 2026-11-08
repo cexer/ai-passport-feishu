@@ -1,4 +1,5 @@
 #include "feishu_api.h"
+#include "feishu_member_search.h"
 
 #include "cJSON.h"
 #include "esp_log.h"
@@ -26,6 +27,7 @@
 
 static const char *TAG = "feishu_api";
 static atomic_uint s_read_epoch;
+static esp_err_t refresh_session_token(feishu_api_session_t *session);
 void feishu_api_cancel_prefetch(void) {(void)atomic_fetch_add(&s_read_epoch,1);}
 
 #define FEISHU_OAUTH_URL "https://accounts.feishu.cn/oauth/v3/token"
@@ -131,6 +133,8 @@ static esp_err_t refresh_user_token(feishu_api_session_t *session,
     if (err != ESP_OK) goto done;
     ESP_LOGI(TAG, "OAuth refresh HTTP %d, response bytes %u",
              status_code, (unsigned)response_length);
+    if(status_code>=400)ESP_LOGW(TAG,"OAuth refresh rejected reason=%s",feishu_auth_refresh_revoked(status_code,oauth_error) ? "invalid_grant":
+        feishu_auth_app_rejected(status_code,oauth_error) ? "invalid_client":!strcmp(oauth_error,"invalid_scope") ? "invalid_scope":"other");
     if (feishu_auth_refresh_revoked(status_code, oauth_error)) {
         err = FEISHU_ERR_AUTH_REVOKED;
         goto done;
@@ -344,7 +348,7 @@ static esp_err_t chat_list_request(feishu_api_session_t *session,const char *url
 esp_err_t feishu_api_chat_page(feishu_api_session_t *session,const char *token,
                                 feishu_chat_t *chats,size_t capacity,feishu_page_cursor_t *page)
 {
-    char base[384],url[384+FEISHU_PAGE_TOKEN_MAX*3+13];
+    char base[384];char *encoded_url=NULL;const char *url=base;
     feishu_http_response_t response = { 0 };
     cJSON *root = NULL;
     cJSON *data;
@@ -357,7 +361,12 @@ esp_err_t feishu_api_chat_page(feishu_api_session_t *session,const char *token,
         return ESP_ERR_INVALID_ARG;
     }
     snprintf(base, sizeof(base), FEISHU_CHATS_URL, (unsigned)capacity);
-    if(!feishu_page_url(base,token,url,sizeof(url)))return ESP_ERR_INVALID_ARG;
+    if(*token){
+        size_t capacity=sizeof(base)+FEISHU_PAGE_TOKEN_MAX*3+13;
+        encoded_url=malloc(capacity);if(!encoded_url)return ESP_ERR_NO_MEM;
+        if(!feishu_page_url(base,token,encoded_url,capacity)){free(encoded_url);return ESP_ERR_INVALID_ARG;}
+        url=encoded_url;
+    }
     err = chat_list_request(session,url,&response);
     if (err != ESP_OK) goto done;
     if(response.status_code<200 || response.status_code>=300) {err=ESP_FAIL;goto done;}
@@ -397,6 +406,7 @@ esp_err_t feishu_api_chat_page(feishu_api_session_t *session,const char *token,
     err = ESP_OK;
 
 done:
+    free(encoded_url);
     ESP_LOGI(TAG,"chat page result=%s rows=%u",esp_err_to_name(err),(unsigned)output_count);
     cJSON_Delete(root);
     feishu_http_response_free(&response);
@@ -420,35 +430,41 @@ typedef struct {
 } message_stream_context_t;
 
 static bool message_epoch_cancelled(void *context)
-{ return ((message_stream_context_t *)context)->read_epoch!=atomic_load(&s_read_epoch); }
+{ return ((message_stream_context_t *)context)->read_epoch!=atomic_load(&s_read_epoch) || !feishu_http_progress(); }
 typedef struct {
     message_stream_context_t *active;
     feishu_message_t *messages;
     size_t capacity;
     const char *self;
     unsigned epoch,scope;
-    bool pagination;
+    bool pagination,cache_text;
 } message_transfer_t;
 static bool message_transfer_cancelled(void *context)
 {
     message_transfer_t *t=context;
     return t->epoch!=atomic_load(&s_read_epoch) || t->scope!=feishu_cache_scope_version();
 }
+static bool message_workspace(message_transfer_t *t)
+{
+    if(t->active)return true;
+    /* Streamed GET owns a static TLS RX buffer before delivering body bytes.
+     * Delay this workspace until headers/TX scratch are released: no parser
+     * overlaps the handshake, and it cannot split an RX hole between records. */
+    ESP_LOGI(TAG,"message workspace lazy=1 bytes=%u free=%u largest=%u",(unsigned)sizeof(*t->active),
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT),
+        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT));
+    t->active=calloc(1,sizeof(*t->active));if(!t->active)return false;
+    t->active->read_epoch=t->epoch;
+    feishu_message_store_init(&t->active->store,message_epoch_cancelled,t->active);
+    feishu_messages_stream_init(&t->active->parser,t->messages,t->capacity,t->self,
+        t->cache_text ? feishu_message_store_operations():NULL,t->cache_text ? &t->active->store:NULL);
+    t->active->parser.pagination_required=t->pagination;return true;
+}
 static esp_err_t message_bytes(void *context,const uint8_t *data,size_t size)
 {
     message_transfer_t *t=context;
     if(message_transfer_cancelled(t))return FEISHU_HTTP_ERR_CANCELLED;
-    if(!t->active) {
-        // No parser/storage workspace competes with the TLS handshake peak.
-        ESP_LOGI(TAG,"message workspace bytes=%u free=%u largest=%u",(unsigned)sizeof(*t->active),(unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT),(unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT));
-        t->active=calloc(1,sizeof(*t->active));
-        if(!t->active)return ESP_ERR_NO_MEM;
-        t->active->read_epoch=t->epoch;
-        feishu_message_store_init(&t->active->store,message_epoch_cancelled,t->active);
-        feishu_messages_stream_init(&t->active->parser,t->messages,t->capacity,t->self,
-            feishu_message_store_operations(),&t->active->store);
-        t->active->parser.pagination_required=t->pagination;
-    }
+    if(!message_workspace(t))return ESP_ERR_NO_MEM;
     return feishu_messages_stream_feed(&t->active->parser,data,size) ? ESP_OK:ESP_ERR_INVALID_RESPONSE;
 }
 static bool message_cancelled(void *context)
@@ -458,7 +474,7 @@ static bool message_cancelled(void *context)
 }
 static esp_err_t read_message_stream(feishu_api_session_t *session,const char *url,
                                       feishu_message_t *messages,size_t capacity,size_t *count,const char *expected,
-                                      const char *token,feishu_page_cursor_t *page)
+                                      const char *token,feishu_page_cursor_t *page,bool cache_text)
 {
     if(!session || !url || !messages || !count || !capacity || capacity>FEISHU_MAX_MESSAGES)
         return ESP_ERR_INVALID_ARG;
@@ -472,17 +488,17 @@ static esp_err_t read_message_stream(feishu_api_session_t *session,const char *u
     esp_err_t err=ESP_FAIL;
     for(unsigned attempt=0;attempt<2;++attempt) {
         message_transfer_t transfer={.messages=messages,.capacity=capacity,
-            .self=session->self_open_id,.epoch=epoch,.scope=scope,.pagination=page!=NULL};
-        int status=0;size_t length=0;
+            .self=session->self_open_id,.epoch=epoch,.scope=scope,.pagination=page!=NULL,.cache_text=cache_text};
+        int status=0,api_code=-1;size_t length=0;
         ESP_LOGI(TAG,"message start token_bytes=%u free=%u largest=%u stack=%u",(unsigned)strlen(session->user_access_token),(unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT),(unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT),(unsigned)uxTaskGetStackHighWaterMark(NULL));
-        err=feishu_http_get_stream(url,session->user_access_token,64u*1024u*1024u,
-            message_bytes,&transfer,message_transfer_cancelled,&transfer,&status,&length);
+        err=feishu_http_get_stream_code(url,session->user_access_token,64u*1024u*1024u,
+            message_bytes,&transfer,message_transfer_cancelled,&transfer,&status,&length,&api_code);
         c=transfer.active;
         ESP_LOGI(TAG,"message stream HTTP %d, bytes %u result=%s",status,(unsigned)length,esp_err_to_name(err));
         if(err==FEISHU_HTTP_ERR_CANCELLED || message_transfer_cancelled(&transfer)) {err=FEISHU_HTTP_ERR_CANCELLED;break;}
-        if(feishu_auth_access_rejected(status,c ? c->parser.api_code:-1)) {
+        if(feishu_auth_access_rejected(status,c ? c->parser.api_code:api_code)) {
             if(c)feishu_messages_stream_abort(&c->parser);
-            feishu_cache_reap_abandoned();
+            if(cache_text)feishu_cache_reap_abandoned();
             if(attempt) {err=FEISHU_ERR_ACCESS_REJECTED;break;}
             if(c) {memset(c,0,sizeof(*c));free(c);c=NULL;}
             err=refresh_session_token(session);
@@ -506,15 +522,15 @@ static esp_err_t read_message_stream(feishu_api_session_t *session,const char *u
         break;
     }
     if(c)feishu_messages_stream_abort(&c->parser);
-    feishu_cache_reap_abandoned();
+    if(cache_text)feishu_cache_reap_abandoned();
     if(c) {memset(c,0,sizeof(*c));free(c);}
     if(err==ESP_OK) {
-        unsigned texts=0,stored=0,unavailable=0;
+        unsigned texts=0,stored=0,unavailable=0,revisions=0;
         for(size_t i=0;i<*count;++i)if(messages[i].type==FEISHU_MESSAGE_TEXT) {
-            ++texts;stored+=messages[i].text_object_id>0;unavailable+=messages[i].text_unavailable;
+            ++texts;stored+=messages[i].text_object_id>0;unavailable+=messages[i].text_unavailable;revisions+=messages[i].update_time_ms>0;
         }
-        ESP_LOGI(TAG,"message page rows=%u texts=%u stored=%u unavailable=%u",
-            (unsigned)*count,texts,stored,unavailable);
+        ESP_LOGI(TAG,"message page rows=%u texts=%u stored=%u unavailable=%u revisions=%u",
+            (unsigned)*count,texts,stored,unavailable,revisions);
     }
     return err;
 }
@@ -522,28 +538,54 @@ static esp_err_t read_message_stream(feishu_api_session_t *session,const char *u
 esp_err_t feishu_api_list_messages(feishu_api_session_t *session,const char *chat_id,
                                    feishu_message_t *messages,size_t capacity,size_t *count)
 {
-    if(!chat_id)return ESP_ERR_INVALID_ARG;
+    if(!session || !chat_id)return ESP_ERR_INVALID_ARG;
     char url[512];
     snprintf(url,sizeof(url),FEISHU_MESSAGES_URL,chat_id,(unsigned)capacity);
     feishu_page_cursor_t page={0};
-    return read_message_stream(session,url,messages,capacity,count,NULL,"",&page);
+    return read_message_stream(session,url,messages,capacity,count,NULL,"",&page,!session->defer_list_bodies);
 }
 
+static esp_err_t message_page_request(feishu_api_session_t *session,const char *chat_id,const char *token,
+                                   feishu_message_t *messages,size_t capacity,feishu_page_cursor_t *page,bool cache_text)
+{
+    if(!session || !chat_id || !page || !feishu_page_token_valid(token))return ESP_ERR_INVALID_ARG;
+    char base[512];char *encoded_url=NULL;const char *url=base;size_t count=0;
+    snprintf(base,sizeof(base),FEISHU_MESSAGES_URL,chat_id,(unsigned)capacity);
+    if(*token){
+        size_t capacity=sizeof(base)+FEISHU_PAGE_TOKEN_MAX*3+13;
+        encoded_url=malloc(capacity);if(!encoded_url)return ESP_ERR_NO_MEM;
+        if(!feishu_page_url(base,token,encoded_url,capacity)){free(encoded_url);return ESP_ERR_INVALID_ARG;}
+        url=encoded_url;
+    }
+    esp_err_t err=read_message_stream(session,url,messages,capacity,&count,NULL,token,page,cache_text);
+    free(encoded_url);return err;
+}
 esp_err_t feishu_api_message_page(feishu_api_session_t *session,const char *chat_id,const char *token,
                                    feishu_message_t *messages,size_t capacity,feishu_page_cursor_t *page)
 {
-    if(!chat_id || !page || !feishu_page_token_valid(token))return ESP_ERR_INVALID_ARG;
-    char base[512],url[512+FEISHU_PAGE_TOKEN_MAX*3+13];size_t count=0;
-    snprintf(base,sizeof(base),FEISHU_MESSAGES_URL,chat_id,(unsigned)capacity);
-    if(!feishu_page_url(base,token,url,sizeof(url)))return ESP_ERR_INVALID_ARG;
-    return read_message_stream(session,url,messages,capacity,&count,NULL,token,page);
+    if(!session)return ESP_ERR_INVALID_ARG;
+    return message_page_request(session,chat_id,token,messages,capacity,page,!session->defer_list_bodies);
+}
+esp_err_t feishu_api_message_preview_page(feishu_api_session_t *session,const char *chat_id,const char *token,
+                                   feishu_message_t *messages,size_t capacity,feishu_page_cursor_t *page)
+{return message_page_request(session,chat_id,token,messages,capacity,page,false);}
+
+esp_err_t feishu_api_message_preview(feishu_api_session_t *session,const char *chat_id,
+                                   feishu_message_t *message,bool *present)
+{
+    if(!chat_id || !*chat_id || strlen(chat_id)>=FEISHU_CHAT_ID_MAX || !present)return ESP_ERR_INVALID_ARG;
+    *present=false;char url[512];size_t count=0;
+    snprintf(url,sizeof(url),FEISHU_MESSAGES_URL,chat_id,1u);
+    esp_err_t err=read_message_stream(session,url,message,1,&count,NULL,NULL,NULL,false);
+    if(err==ESP_OK)*present=count!=0;
+    return err;
 }
 esp_err_t feishu_api_get_message(feishu_api_session_t *session,const char *message_id,feishu_message_t *message)
 {
     if(!message_id || !*message_id || strlen(message_id)>=FEISHU_MESSAGE_ID_MAX)return ESP_ERR_INVALID_ARG;
     char url[256];size_t count=0;
     snprintf(url,sizeof(url),"https://open.feishu.cn/open-apis/im/v1/messages/%s?user_id_type=open_id",message_id);
-    return read_message_stream(session,url,message,1,&count,message_id,NULL,NULL);
+    return read_message_stream(session,url,message,1,&count,message_id,NULL,NULL,true);
 }
 
 typedef struct { const feishu_send_source_t *source;const feishu_send_part_t *part; } message_upload_t;
@@ -599,7 +641,16 @@ static esp_err_t send_source(feishu_api_session_t *session,const feishu_send_sou
             err=refresh_session_token(session);if(err!=ESP_OK)return err;
             continue;
         }
-        if(err==ESP_OK && status>=200 && status<300 && success) {*sent=part.length;return ESP_OK;}
+        if(err==ESP_OK && status>=200 && status<300 && success) {
+            feishu_utf8_copy(session->last_sent_id,sizeof(session->last_sent_id),message_id);
+            session->last_sent_preview[0]=0;session->last_sent_length=part.length;
+            size_t got=0,wanted=sizeof(session->last_sent_preview)-1;
+            if(part.length<wanted)wanted=(size_t)part.length;
+            if(source->read(source->context,part.offset,session->last_sent_preview,wanted,&got) && got<=wanted)
+                session->last_sent_preview[got]=0;
+            else session->last_sent_preview[0]=0;
+            *sent=part.length;return ESP_OK;
+        }
         return access_rejected ? FEISHU_ERR_ACCESS_REJECTED:err!=ESP_OK ? err:ESP_ERR_INVALID_RESPONSE;
     }
     return ESP_FAIL;
@@ -641,8 +692,13 @@ esp_err_t feishu_api_send_pending_part(feishu_api_session_t *session,const feish
     *sent=0;*rejected=true;
     if(!feishu_outbox_valid(p) || p->state!=FEISHU_OUTBOX_SENDING)return ESP_ERR_INVALID_ARG;
     char uuid[41];if(!feishu_outbox_uuid(p,uuid))return ESP_ERR_INVALID_ARG;
+    int64_t pin=0;uint64_t size=0;
+    esp_err_t err=feishu_cache_text_pin(p->body_name,p->object_id,false,&pin,&size);
+    if(err!=ESP_OK)return err;
+    if(size!=p->length){feishu_cache_unpin(&pin);return ESP_ERR_INVALID_RESPONSE;}
     feishu_send_source_t source={draft_text_read,(void *)p,p->length};
-    return send_source(session,&source,p->offset,p->message[0] ? p->message:p->chat,uuid,p->message[0]!=0,false,true,sent,rejected);
+    err=send_source(session,&source,p->offset,p->message[0] ? p->message:p->chat,uuid,p->message[0]!=0,false,true,sent,rejected);
+    feishu_cache_unpin(&pin);return err;
 }
 
 esp_err_t feishu_api_download_image(feishu_api_session_t *session,
@@ -821,3 +877,5 @@ void feishu_api_asr_stream_close(void)
 {
     feishu_http_stream_close();
 }
+
+#include "feishu_member_lookup.inc"

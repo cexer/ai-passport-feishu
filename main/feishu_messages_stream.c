@@ -3,9 +3,9 @@
 #include <string.h>
 
 enum {R_NONE,R_ROOT,R_DATA,R_ITEMS,R_ITEM,R_SENDER,R_BODY,R_MENTIONS,R_MENTION,R_INNER,R_IGNORE,R_POST_LINES,R_POST_ROW};
-enum {K_NONE,K_CODE,K_DATA,K_ITEMS,K_ID,K_TYPE,K_SENDER,K_BODY,K_CONTENT,K_TIME,K_DELETED,
+enum {K_NONE,K_CODE,K_DATA,K_ITEMS,K_ID,K_TYPE,K_SENDER,K_BODY,K_CONTENT,K_TIME,K_UPDATE_TIME,K_DELETED,
       K_SENDER_ID,K_SENDER_NAME,K_MENTIONS,K_KEY,K_NAME,K_TEXT,K_TITLE,K_IMAGE,K_FILE,K_TAG,K_HREF,K_LANG_CN,K_LANG,K_MORE,K_PAGE_TOKEN};
-enum {S_NONE,S_ID,S_TYPE,S_SENDER_ID,S_NAME,S_TIME,S_BODY,S_MENTION_KEY,S_MENTION_NAME,S_TEXT,S_TITLE,S_IMAGE,S_TAG,S_HREF,S_POST_NAME,S_PAGE_TOKEN};
+enum {S_NONE,S_ID,S_TYPE,S_SENDER_ID,S_NAME,S_TIME,S_UPDATE_TIME,S_BODY,S_MENTION_KEY,S_MENTION_NAME,S_TEXT,S_TITLE,S_IMAGE,S_TAG,S_HREF,S_POST_NAME,S_PAGE_TOKEN};
 
 static bool equals(const uint8_t *data,size_t size,const char *word)
 { return data && size==strlen(word) && !memcmp(data,word,size); }
@@ -13,7 +13,7 @@ static unsigned key_type(const uint8_t *data,size_t size)
 {
     static const struct {const char *name;unsigned key;} names[]={
         {"code",K_CODE},{"data",K_DATA},{"items",K_ITEMS},{"message_id",K_ID},{"msg_type",K_TYPE},
-        {"sender",K_SENDER},{"body",K_BODY},{"content",K_CONTENT},{"create_time",K_TIME},
+        {"sender",K_SENDER},{"body",K_BODY},{"content",K_CONTENT},{"create_time",K_TIME},{"update_time",K_UPDATE_TIME},
         {"deleted",K_DELETED},{"id",K_SENDER_ID},{"sender_name",K_SENDER_NAME},{"mentions",K_MENTIONS},
         {"key",K_KEY},{"name",K_NAME},{"text",K_TEXT},{"title",K_TITLE},{"image_key",K_IMAGE},
         {"has_more",K_MORE},{"page_token",K_PAGE_TOKEN},{"file_key",K_FILE},{"tag",K_TAG},{"href",K_HREF},{"user_name",K_NAME},{"zh_cn",K_LANG_CN}};
@@ -175,6 +175,7 @@ static void end_item(feishu_messages_stream_t *p)
            !p->storage.prepare(p->storage_context,p->count,!p->mapping_failed,&p->current.text_length,&p->current.text_mapped,
                p->current.text,sizeof(p->current.text),p->text_block,sizeof(p->text_block)))p->text_failed=true;
         p->current.text_unavailable=p->text_failed;
+        p->current.text_needs_mapping=p->text_failed && (p->mention_count || p->mapping_failed);
         p->current.text_truncated=p->current.text_length>strlen(p->current.text);
         p->text_ready[p->count]=!p->text_failed;
         if(p->text_failed)abort_slot(p);
@@ -188,7 +189,14 @@ static bool outer_event(void *context,feishu_json_event_t event,unsigned depth,c
     if(depth>=FEISHU_JSON_DEPTH)return false;
     unsigned role=depth ? p->outer_role[depth-1] : R_NONE;
     unsigned key=depth ? p->outer_key[depth-1] : K_NONE;
-    if(event==FEISHU_JSON_KEY) {p->outer_key[depth-1]=(uint8_t)key_type(data,size);return true;}
+    if(event==FEISHU_JSON_KEY) {
+        unsigned parsed=key_type(data,size);p->outer_key[depth-1]=(uint8_t)parsed;
+        if(role==R_ITEM && parsed==K_UPDATE_TIME){
+            if(p->update_seen){p->update_invalid=true;p->current.update_time_ms=0;}
+            p->update_seen=true;
+        }
+        return true;
+    }
     if(event==FEISHU_JSON_OBJECT_BEGIN || event==FEISHU_JSON_ARRAY_BEGIN) {
         if(role==R_DATA && (key==K_MORE || key==K_PAGE_TOKEN))return false;
         unsigned next=R_NONE;
@@ -204,7 +212,7 @@ static bool outer_event(void *context,feishu_json_event_t event,unsigned depth,c
             next=R_ITEM;p->item_active=true;
             memset(&p->current,0,sizeof(p->current));p->type[0]=0;
             p->item_invalid=p->sender_seen=p->type_seen=p->body_seen=p->body_invalid=false;
-            p->mention_count=0;p->mapping_failed=p->mentions_seen=false;p->locale=0;reset_text(p);
+            p->mention_count=0;p->mapping_failed=p->mentions_seen=false;p->update_seen=p->update_invalid=false;p->locale=0;reset_text(p);
         } else if(role==R_ITEM && key==K_SENDER && event==FEISHU_JSON_OBJECT_BEGIN) {next=R_SENDER;p->sender_seen=true;}
         else if(role==R_ITEM && key==K_BODY && event==FEISHU_JSON_OBJECT_BEGIN)next=R_BODY;
         else if(role==R_ITEM && key==K_MENTIONS && event==FEISHU_JSON_ARRAY_BEGIN) {
@@ -245,7 +253,7 @@ static bool outer_event(void *context,feishu_json_event_t event,unsigned depth,c
             if(p->next_seen)return false;
             p->next_seen=true;p->next_page_size=0;p->next_page[0]=0;p->outer_route=S_PAGE_TOKEN;
         } else if(role==R_ITEM) {
-            if(key==K_ID)p->outer_route=S_ID;else if(key==K_TYPE)p->outer_route=S_TYPE;else if(key==K_TIME)p->outer_route=S_TIME;
+            if(key==K_ID)p->outer_route=S_ID;else if(key==K_TYPE)p->outer_route=S_TYPE;else if(key==K_TIME)p->outer_route=S_TIME;else if(key==K_UPDATE_TIME)p->outer_route=S_UPDATE_TIME;
         } else if(role==R_SENDER) {
             if(key==K_SENDER_ID)p->outer_route=S_SENDER_ID;else if(key==K_SENDER_NAME)p->outer_route=S_NAME;
         } else if(role==R_MENTION) {
@@ -274,6 +282,11 @@ static bool outer_event(void *context,feishu_json_event_t event,unsigned depth,c
         case S_SENDER_ID:feishu_utf8_copy(p->current.sender_id,sizeof(p->current.sender_id),p->small);break;
         case S_NAME:feishu_utf8_copy(p->current.sender_name,sizeof(p->current.sender_name),p->small);break;
         case S_TIME:{uint64_t n;if(number((const uint8_t *)p->small,p->small_size,&n))p->current.create_time_ms=n;break;}
+        case S_UPDATE_TIME:{uint64_t n;
+            if(!p->small_overflow && !p->update_invalid && number((const uint8_t *)p->small,p->small_size,&n))
+                p->current.update_time_ms=n;
+            break;
+        }
         case S_MENTION_KEY:
             if(p->small_overflow || p->small_size>=sizeof(p->mention.key))p->mention_invalid=true;
             else feishu_utf8_copy(p->mention.key,sizeof(p->mention.key),p->small);

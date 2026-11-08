@@ -2,6 +2,15 @@
 
 #include <string.h>
 
+bool feishu_message_merge_ack(feishu_message_t *rows,size_t *count,size_t capacity,
+                              const feishu_message_t *ack)
+{
+    if(!rows || !count || !capacity || *count>capacity || !ack || !ack->message_id[0])return false;
+    for(size_t i=0;i<*count;++i)if(!strcmp(rows[i].message_id,ack->message_id))return true;
+    if(*count==capacity){memmove(rows,rows+1,(capacity-1)*sizeof(*rows));--*count;}
+    rows[(*count)++]=*ack;return false;
+}
+
 uint32_t feishu_unread_count(const feishu_message_t *messages, size_t count,
                              uint64_t last_seen_time_ms)
 {
@@ -188,10 +197,13 @@ feishu_nav_action_t feishu_nav_handle(feishu_nav_t *nav,
         }
         break;
     case FEISHU_PAGE_DRAFTS:
-        if(event==FEISHU_NAV_UP)move_selection(&nav->draft_index,nav->draft_count,-1);
-        if(event==FEISHU_NAV_DOWN)move_selection(&nav->draft_index,nav->draft_count,1);
+        if(event==FEISHU_NAV_UP)move_selection(&nav->draft_index,nav->draft_count+1,-1);
+        if(event==FEISHU_NAV_DOWN)move_selection(&nav->draft_index,nav->draft_count+1,1);
         if(event==FEISHU_NAV_BACK) {nav->page=FEISHU_PAGE_CHATS;nav->draft_manager=false;}
-        if(event==FEISHU_NAV_OK && nav->draft_count)return FEISHU_NAV_OPEN_DRAFT;
+        if(event==FEISHU_NAV_OK){
+            if(nav->draft_index<nav->draft_count)return FEISHU_NAV_OPEN_DRAFT;
+            nav->confirm_action=4;nav->page=FEISHU_PAGE_CONFIRM;
+        }
         break;
     case FEISHU_PAGE_SETTINGS:
         if (event == FEISHU_NAV_UP) move_selection(&nav->settings_index, FEISHU_SETTING_COUNT, -1);
@@ -208,15 +220,40 @@ feishu_nav_action_t feishu_nav_handle(feishu_nav_t *nav,
                 nav->page=FEISHU_PAGE_DRAFTS;nav->draft_manager=true;nav->draft_index=nav->draft_count=0;
                 return FEISHU_NAV_LIST_DRAFTS;
             } else if(nav->settings_index==FEISHU_SETTING_XIAOZHI) {
-                nav->page=FEISHU_PAGE_XIAOZHI;return FEISHU_NAV_CHECK_XIAOZHI;
+                nav->page=FEISHU_PAGE_XIAOZHI_SETTINGS;nav->settings_index=0;
+            } else if(nav->settings_index==FEISHU_SETTING_SOUNDS) {
+                nav->page=FEISHU_PAGE_SOUND_SETTINGS;nav->settings_index=0;
+            } else if(nav->settings_index==FEISHU_SETTING_POWER) {
+                nav->page=FEISHU_PAGE_POWER_SETTINGS;nav->settings_index=0;
+            } else if(nav->settings_index==FEISHU_SETTING_ABOUT) {
+                nav->page=FEISHU_PAGE_ABOUT;
+            } else if(nav->settings_index==FEISHU_SETTING_ASSISTANT) {
+                return FEISHU_NAV_ENTER_ASSISTANT;
             } else {
                 nav->page = FEISHU_PAGE_CHATS;
             }
         }
         break;
+    case FEISHU_PAGE_ABOUT:
+        if(event==FEISHU_NAV_BACK){nav->page=FEISHU_PAGE_SETTINGS;nav->settings_index=FEISHU_SETTING_ABOUT;}
+        break;
+    case FEISHU_PAGE_ASSISTANT:
+        if(event==FEISHU_NAV_BACK){nav->page=FEISHU_PAGE_SETTINGS;nav->settings_index=FEISHU_SETTING_ASSISTANT;}
+        break;
+    case FEISHU_PAGE_XIAOZHI_SETTINGS:
+        if(event==FEISHU_NAV_UP || event==FEISHU_NAV_DOWN)move_selection(&nav->settings_index,4,event==FEISHU_NAV_UP ? -1:1);
+        if(event==FEISHU_NAV_BACK){nav->page=FEISHU_PAGE_SETTINGS;nav->settings_index=FEISHU_SETTING_XIAOZHI;}
+        if(event==FEISHU_NAV_OK){
+            if(nav->settings_index==0){nav->page=FEISHU_PAGE_XIAOZHI;return FEISHU_NAV_CHECK_XIAOZHI;}
+            if(nav->settings_index==1){nav->page=FEISHU_PAGE_ASSISTANT_SETTINGS;nav->settings_index=0;}
+        }
+        break;
+    case FEISHU_PAGE_ASSISTANT_SETTINGS:
+        if(event==FEISHU_NAV_BACK){nav->page=FEISHU_PAGE_XIAOZHI_SETTINGS;nav->settings_index=1;}
+        break;
     case FEISHU_PAGE_XIAOZHI:
         if(event==FEISHU_NAV_OK)return FEISHU_NAV_CHECK_XIAOZHI;
-        if(event==FEISHU_NAV_BACK)nav->page=FEISHU_PAGE_SETTINGS;
+        if(event==FEISHU_NAV_BACK){nav->page=FEISHU_PAGE_XIAOZHI_SETTINGS;nav->settings_index=0;}
         break;
     case FEISHU_PAGE_ACCOUNT:
         if(event==FEISHU_NAV_UP)move_selection(&nav->settings_index,3,-1);
@@ -236,11 +273,12 @@ feishu_nav_action_t feishu_nav_handle(feishu_nav_t *nav,
         break;
     case FEISHU_PAGE_CONFIRM:
         if (event == FEISHU_NAV_OK) {
-            return nav->confirm_action == 1 ? FEISHU_NAV_RESET_WIFI :
+            return nav->confirm_action == 4 ? FEISHU_NAV_CLEAR_DRAFTS:nav->confirm_action == 1 ? FEISHU_NAV_RESET_WIFI :
                    nav->confirm_action == 2 ? FEISHU_NAV_UNBIND : FEISHU_NAV_REAUTHORIZE;
         }
         if (event == FEISHU_NAV_UP || event == FEISHU_NAV_DOWN ||
             event == FEISHU_NAV_BACK) {
+            if(nav->confirm_action==4){nav->confirm_action=0;nav->page=FEISHU_PAGE_DRAFTS;break;}
             nav->settings_index=nav->confirm_action==1 ? FEISHU_SETTING_NETWORK:FEISHU_SETTING_ACCOUNT;
             nav->confirm_action = 0;
             nav->page = FEISHU_PAGE_SETTINGS;
@@ -318,4 +356,39 @@ size_t feishu_message_window(const uint16_t *heights,size_t count,size_t selecte
         ++last;used+=4u+heights[last];
     }
     *start=first;return last-first+1;
+}
+
+bool feishu_message_receive(feishu_message_t *rows,size_t *count,size_t capacity,
+                            size_t *selection,bool follow,const feishu_message_t *incoming)
+{
+    if(!rows || !count || !selection || !capacity || *count>capacity || !incoming ||
+       !incoming->message_id[0] || incoming->deleted)return false;
+    for(size_t i=0;i<*count;++i)if(!strcmp(rows[i].message_id,incoming->message_id))return false;
+    if(*count && incoming->create_time_ms<rows[*count-1].create_time_ms)return false;
+    if(*count==capacity && *selection)--*selection;
+    (void)feishu_message_merge_ack(rows,count,capacity,incoming);
+    if(follow)*selection=*count-1;
+    else if(*selection>=*count)*selection=*count-1;
+    return true;
+}
+
+bool feishu_message_restore_body(feishu_message_t *preview,const feishu_message_t *cached)
+{
+    if(!preview || !cached || preview->type!=FEISHU_MESSAGE_TEXT || cached->type!=FEISHU_MESSAGE_TEXT ||
+       preview->deleted || cached->deleted || !preview->update_time_ms ||
+       preview->update_time_ms!=cached->update_time_ms || preview->create_time_ms!=cached->create_time_ms ||
+       strcmp(preview->message_id,cached->message_id) || cached->text_object_id<=0 || cached->text_unavailable)return false;
+    preview->text_object_id=cached->text_object_id;preview->text_length=cached->text_length;
+    preview->text_mapped=cached->text_mapped;preview->text_truncated=cached->text_truncated;
+    preview->text_unavailable=false;preview->text_needs_mapping=cached->text_needs_mapping;
+    feishu_utf8_copy(preview->text,sizeof(preview->text),cached->text);return true;
+}
+int feishu_chat_next_page(size_t index,size_t count,bool more)
+{return count && index==count-1 ? (more ? 1:-1):0;}
+
+void feishu_nav_message_load_failed(feishu_nav_t *nav,bool same_chat)
+{
+    if(!nav)return;
+    nav->page=FEISHU_PAGE_MESSAGES;
+    if(!same_chat){nav->message_count=0;nav->message_index=0;nav->composer_selected=true;}
 }

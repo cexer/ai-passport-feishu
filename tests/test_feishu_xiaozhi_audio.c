@@ -7,6 +7,8 @@ _Static_assert(FEISHU_XIAO_CAPTURE_SAMPLES*1000==16000*FEISHU_XIAO_FRAME_MS,"cap
 _Static_assert(FEISHU_XIAO_QUEUE_SAMPLES*1000==8000*FEISHU_XIAO_FRAME_MS,"wire duration");
 _Static_assert(FEISHU_XIAO_QUEUE_FRAMES*FEISHU_XIAO_FRAME_MS==2400,"backlog duration");
 _Static_assert(sizeof(feishu_xiao_packet_t)==124,"queue packet footprint");
+_Static_assert(FEISHU_XIAO_IDLE_FRAMES*FEISHU_XIAO_FRAME_MS==1600,"idle capture runway before read cancellation");
+_Static_assert((FEISHU_XIAO_QUEUE_FRAMES-FEISHU_XIAO_IDLE_FRAMES)*sizeof(feishu_xiao_packet_t)==4960,"deferred speech queue bytes");
 int main(void)
 {
     int16_t pcm[320]={32767,-32768,-32768,-32768,32767,32767,-3,0,0,3},out[161];

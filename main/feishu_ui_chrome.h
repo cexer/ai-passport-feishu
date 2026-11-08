@@ -11,16 +11,17 @@ static inline void feishu_ui_rule(lv_obj_t *screen,int y)
 {
     lv_obj_t *rule=lv_obj_create(screen);
     lv_obj_remove_flag(rule,LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_pos(rule,10,y);lv_obj_set_size(rule,220,1);
+    lv_obj_set_pos(rule,0,y);lv_obj_set_size(rule,240,1);
+    lv_obj_set_style_radius(rule,0,0);
     lv_obj_set_style_border_width(rule,0,0);lv_obj_set_style_pad_all(rule,0,0);
     lv_obj_set_style_bg_color(rule,lv_color_hex(FEISHU_RULE),0);
     lv_obj_set_style_bg_opa(rule,LV_OPA_COVER,0);
 }
 
-static inline void feishu_ui_header(lv_obj_t *screen,lv_obj_t **title,lv_obj_t **battery)
+static inline void feishu_ui_header(lv_obj_t *screen,lv_obj_t **title,lv_obj_t **battery,lv_obj_t **assistant)
 {
     *title=lv_label_create(screen);lv_label_set_text(*title,"");
-    lv_obj_set_size(*title,160,18);lv_obj_set_pos(*title,12,10);
+    lv_obj_set_size(*title,96,18);lv_obj_set_pos(*title,12,10);
     lv_label_set_long_mode(*title,LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_font(*title,&lv_font_ai_passport_14,0);
     lv_obj_set_style_text_color(*title,lv_color_hex(FEISHU_TEXT),0);
@@ -41,13 +42,17 @@ static inline void feishu_ui_header(lv_obj_t *screen,lv_obj_t **title,lv_obj_t *
     lv_obj_set_style_text_align(*battery,LV_TEXT_ALIGN_CENTER,0);
     lv_obj_set_style_text_color(*battery,lv_color_hex(FEISHU_MUTED),0);
     lv_label_set_text(*battery,"?");lv_obj_center(*battery);
+    lv_obj_t *badge=lv_label_create(screen);lv_label_set_text(badge,"智");
+    lv_obj_set_style_text_font(badge,&lv_font_ai_passport_14,0);
+    lv_obj_set_style_text_color(badge,lv_color_hex(0x657782),0);
+    lv_obj_set_pos(badge,158,10);if(assistant)*assistant=badge;
     feishu_ui_rule(screen,34);
 }
 
 static inline void feishu_ui_footer(lv_obj_t *screen,lv_obj_t **notice,lv_obj_t *actions[3])
 {
     lv_obj_t *footer=lv_obj_create(screen);
-    lv_obj_set_pos(footer,10,272);lv_obj_set_size(footer,220,48);
+    lv_obj_set_pos(footer,0,272);lv_obj_set_size(footer,240,48);
     lv_obj_remove_flag(footer,LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_opa(footer,LV_OPA_TRANSP,0);
     lv_obj_set_style_border_color(footer,lv_color_hex(FEISHU_RULE),0);
@@ -59,7 +64,7 @@ static inline void feishu_ui_footer(lv_obj_t *screen,lv_obj_t **notice,lv_obj_t 
     lv_obj_t *labels[]={*notice,actions[0],actions[1],actions[2]};
     for(unsigned i=0;i<4;++i) {
         lv_label_set_text(labels[i],"");
-        lv_obj_set_pos(labels[i],3,i ? 26:4);lv_obj_set_size(labels[i],212,18);
+        lv_obj_set_pos(labels[i],13,i ? 26:4);lv_obj_set_size(labels[i],212,18);
         lv_obj_set_style_text_font(labels[i],&lv_font_ai_passport_14,0);
         lv_obj_set_style_text_align(labels[i],LV_TEXT_ALIGN_CENTER,0);
         lv_obj_set_style_text_color(labels[i],lv_color_hex(FEISHU_MUTED),0);
@@ -75,6 +80,7 @@ static inline void feishu_ui_actions(lv_obj_t *groups[3],const char *formatted)
         char *next=strstr(cursor,"  ");if(!next)next=strstr(cursor," / ");
         char *rest=next ? next+(*next==' ' && next[1]=='/' ? 3:2):NULL;
         if(next)*next=0;
+        lv_label_set_recolor(groups[count],false);
         if(strcmp(lv_label_get_text(groups[count]),cursor))lv_label_set_text(groups[count],cursor);
         lv_obj_set_style_text_letter_space(groups[count],0,0);
         lv_obj_set_width(groups[count],LV_SIZE_CONTENT);lv_obj_update_layout(groups[count]);
@@ -88,7 +94,7 @@ static inline void feishu_ui_actions(lv_obj_t *groups[3],const char *formatted)
         }
     }
     int gap=count>1 ? (218-total)/(count-1):0;if(gap>18)gap=18;
-    int x=(218-total-gap*(count-1))/2;
+    int x=10+(218-total-gap*(count-1))/2;
     for(int i=0;i<3;++i) {
         if(i>=count){lv_label_set_text(groups[i],"");continue;}
         lv_obj_set_pos(groups[i],x,26);x+=widths[i]+gap;

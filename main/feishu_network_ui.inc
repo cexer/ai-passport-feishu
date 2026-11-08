@@ -42,6 +42,7 @@ static void network_enter(void)
 }
 static void network_work(work_command_t command)
 {
+    int64_t started=esp_timer_get_time();
     uint32_t generation;size_t index;char ssid[33]={0},password[65]={0};bool candidate=false;
     xSemaphoreTake(s_state_lock,portMAX_DELAY);
     if(!s_network_ui || !network_page(s_state.nav.page)){xSemaphoreGive(s_state_lock);return;}
@@ -104,6 +105,7 @@ static void network_work(work_command_t command)
         if(notice)feishu_utf8_copy(s_state.status,sizeof(s_state.status),notice);
         else snprintf(s_state.status,sizeof(s_state.status),"%s，已记忆%u/10",feishu_network_connected() ? "网络已连接":"当前离线",(unsigned)u->count);
     }
+    if(command==WORK_NETWORK_LIST)ESP_LOGI(TAG,"NETWORK_LIST_READY result=%d count=%u ms=%u",err,(unsigned)count,(unsigned)((esp_timer_get_time()-started)/1000));
     xSemaphoreGive(s_state_lock);memset(password,0,sizeof(password));memset(&config,0,sizeof(config));
 }
 static bool network_navigation(feishu_nav_event_t event)
@@ -227,7 +229,7 @@ static void network_render(char *body,size_t capacity,char *hint,size_t hint_siz
         render_choice_rows(labels+start,visible,u->selected<n ? u->selected-start:visible,false);
         network_fixed_row(4,218,s_state.nav.page==FEISHU_PAGE_NETWORK ? "添加网络":"重新扫描",u->selected==n);
         network_fixed_row(5,243,"手动配网",u->selected==n+1);
-        if(!n){lv_obj_remove_flag(s_content,LV_OBJ_FLAG_HIDDEN);snprintf(body,capacity,"%s",s_state.nav.page==FEISHU_PAGE_NETWORK ? "暂无已记忆网络":"未发现附近网络");}
+        if(!n){lv_obj_remove_flag(s_content,LV_OBJ_FLAG_HIDDEN);snprintf(body,capacity,"%s",s_state.nav.page==FEISHU_PAGE_NETWORK ? (u->busy ? "正在读取已记忆网络…":"暂无已记忆网络"):(u->busy ? "正在扫描附近网络…":"未发现附近网络"));}
         lv_obj_invalidate(s_scr);
     }
     snprintf(hint,hint_size,"上下选择  确定打开  长按返回");

@@ -153,5 +153,49 @@ int main(int argc,char **argv)
     assert(!feishu_store_load_wifi(got_wifi,sizeof(got_wifi)) && !memcmp(wifi,got_wifi,sizeof(wifi)));
     assert(!feishu_store_require_wifi_setup(false));assert(!feishu_store_wifi_setup_required());
     puts("store seen monotonicity, no legacy resurrection and database-independent recovery: PASS");
+    feishu_assistant_settings_t settings;
+    assert(!feishu_store_load_assistant(&settings) && !settings.boot && settings.silence_seconds==2 && settings.volume==60 && settings.timeout_minutes==10);
+    for(unsigned i=0;i<5;++i){
+        settings=(feishu_assistant_settings_t){true,i ? i+1:0,i*25,i*15};
+        assert(!feishu_store_save_assistant(&settings));migrated=false;
+        feishu_assistant_settings_t restored;
+        assert(!feishu_store_load_assistant(&restored) && restored.boot && restored.silence_seconds==settings.silence_seconds && restored.volume==settings.volume && restored.timeout_minutes==settings.timeout_minutes);
+    }
+    uint8_t legacy_assistant[]={1,1,4,0};
+    assert(!save_value(ROOT_ASSISTANT,legacy_assistant,sizeof(legacy_assistant)));
+    assert(!feishu_store_load_assistant(&settings) && settings.boot && settings.silence_seconds==4 && settings.volume==60 && settings.timeout_minutes==10);
+    uint8_t v2_assistant[]={2,0,2,80};
+    assert(!save_value(ROOT_ASSISTANT,v2_assistant,sizeof(v2_assistant)));
+    assert(!feishu_store_load_assistant(&settings) && settings.volume==80 && settings.timeout_minutes==10);
+    settings.timeout_minutes=61;assert(feishu_store_save_assistant(&settings)==ESP_ERR_INVALID_ARG);settings.timeout_minutes=10;
+    settings.volume=101;assert(feishu_store_save_assistant(&settings)==ESP_ERR_INVALID_ARG);settings.volume=60;
+    settings.silence_seconds=1;assert(feishu_store_save_assistant(&settings)==ESP_ERR_INVALID_ARG);
+    settings.silence_seconds=6;assert(feishu_store_save_assistant(&settings)==ESP_ERR_INVALID_ARG);
+    uint8_t bad_settings[]={1,1,9,0};
+    assert(!save_value(ROOT_ASSISTANT,bad_settings,sizeof(bad_settings)));
+    assert(feishu_store_load_assistant(&settings)==FEISHU_STORE_ERR_CORRUPT && !settings.boot && settings.silence_seconds==2 && settings.volume==60 && settings.timeout_minutes==10);
+    puts("assistant settings: defaults, all choices, reopen, invalid and corrupt record: PASS");
+    feishu_sound_settings_t sound;
+    assert(!feishu_store_load_sounds(&sound) && sound.success && sound.failure && sound.key);
+    for(unsigned mask=0;mask<8;++mask){
+        sound=(feishu_sound_settings_t){(mask&1)!=0,(mask&2)!=0,(mask&4)!=0};
+        assert(!feishu_store_save_sounds(&sound));migrated=false;
+        feishu_sound_settings_t got;
+        assert(!feishu_store_load_sounds(&got) && got.success==sound.success && got.failure==sound.failure && got.key==sound.key);
+    }
+    uint8_t bad_sound[]={1,8};assert(!save_value(ROOT_SOUNDS,bad_sound,sizeof(bad_sound)));
+    assert(feishu_store_load_sounds(&sound)==FEISHU_STORE_ERR_CORRUPT && sound.success && sound.failure && sound.key);
+    puts("sound settings: independent combinations, reboot and corrupt fallback PASS");
+    feishu_power_settings_t power;
+    assert(!feishu_store_load_power(&power) && power.screen_minutes==2 && power.cpu==2 && power.refresh==0 && power.wifi==2);
+    for(unsigned m=0;m<3;++m){
+        power=(feishu_power_settings_t){(uint8_t)(m+2),m,m,m};
+        assert(!feishu_store_save_power(&power));migrated=false;
+        feishu_power_settings_t got;assert(!feishu_store_load_power(&got));assert(!memcmp(&got,&power,sizeof(got)));
+    }
+    uint8_t bad_power[]={1,2,3,0,2};assert(!save_value(ROOT_POWER,bad_power,sizeof(bad_power)));migrated=false;
+    assert(feishu_store_load_power(&power)==FEISHU_STORE_ERR_CORRUPT && power.screen_minutes==2 && power.cpu==2);
+    power=feishu_power_defaults();assert(!feishu_store_save_power(&power));
+    puts("power settings: defaults, persist/reopen, invalid and corrupt recovery PASS");
     return 0;
 }

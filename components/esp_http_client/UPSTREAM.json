@@ -1,0 +1,16 @@
+{
+  "source": "ESP-IDF v5.5.3 esp_http_client",
+  "sdk_files_sha256": {
+    "CMakeLists.txt": "e849ca25c09e5dafa4354e99275435e970431a094caef119a53b4955afefc8bc",
+    "esp_http_client.c": "b13fe33b1e63c1c3686ee8ea1072c6bdee994476c283885bc031fc0eb99a6767",
+    "Kconfig": "6b36e6211a812f1a181d1e1bda7f4b511de49362bb6a0db7d0a47943b1759f1c",
+    "include/esp_http_client.h": "6532d4aace036c86181e434df0fa8d431be963397000eb8d89607cdea42e7b6f",
+    "lib/http_auth.c": "69fe7f182c12eb61b75c9e60eae128eaefdae19bd927d7fb3e980e41d6606f35",
+    "lib/http_header.c": "f42ec9d92fef4eccc222e8d9952b74c70a6b92ba4d820f50d2452b1e2ef637d2",
+    "lib/http_utils.c": "b42a88234ec1f3ace762ffe945ddafd7ddbcaeb8728f752ef3f9f9e0dd795a05",
+    "lib/include/http_auth.h": "ad75830b6c73516f2077f43a4edd532521308ef82eb4dd0ce9d1ead0180dc7dc",
+    "lib/include/http_header.h": "4f36aab5332d244e767385b2e6e9357450c0bff9282be79d6c3ce411331a638d",
+    "lib/include/http_utils.h": "7e4110110767661e60a01d639565f2926ffe30f9d449558a3a5008de5dfeecc2"
+  },
+  "local_change": "Opt-in deferred GET transmit buffer; system SDK unchanged."
+}

@@ -23,6 +23,10 @@ enum {
  * recognized raw DB may complete a canonical EMPTY header only after proving
  * its entire sector payload is erased, as required after interrupted GC.
  * An IO failure latches until close/reopen; no further raw mutations occur. */
+/* Register before engine use. Called on logical reads including RAM cache hits.
+ * Callback may yield the scheduler only; it must never re-enter/mutate the DB. */
+void feishu_fdb_set_cooperate(void (*callback)(void));
+void feishu_fdb_cooperate(void);
 int feishu_fdb_open(const feishu_fdb_io_t *io, bool allow_blank);
 void feishu_fdb_close(void);
 int feishu_fdb_status(void);
@@ -49,3 +53,7 @@ uint64_t feishu_fdb_root_revision(void);
  * A cached endpoint pair skips the scan. Every get still revalidates its key,
  * record status and CRC. Call only under the serialized engine owner lock. */
 int feishu_fdb_prefetch(const char *prefix,const char *first,const char *last,unsigned count);
+
+/* Diagnostic-only cold-read preparation under the engine owner lock. Drops RAM
+ * locator hints/read window, performs no Flash reads/writes or revision change. */
+int feishu_fdb_probe_cold(void);

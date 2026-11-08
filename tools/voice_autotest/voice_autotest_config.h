@@ -10,7 +10,7 @@ static struct {
     bool active,repeat;
     const uint8_t *pcm;
     size_t size;
-    unsigned stop_ms,cancel_ms,fail_ms,delay_ms,reads;
+    unsigned stop_ms,cancel_ms,fail_ms,delay_ms,reads,prefix_ms;
     int peak;
     unsigned samples,zeros,clipped;
     int64_t sum;
@@ -30,11 +30,11 @@ static esp_err_t voice_probe_capture(int16_t *pcm,size_t bytes,unsigned elapsed)
     }
     if(voice_probe.fail_ms && elapsed>=voice_probe.fail_ms)return ESP_FAIL;
     if(voice_probe.pcm) {
-        size_t offset=(size_t)elapsed*32;
+        size_t offset=elapsed>=voice_probe.prefix_ms ? (size_t)(elapsed-voice_probe.prefix_ms)*32:SIZE_MAX;
         for(size_t i=0;i<bytes;++i) {
             size_t p=offset+i;
             ((uint8_t *)pcm)[i]=voice_probe.repeat ? voice_probe.pcm[p%voice_probe.size]:
-                (p<voice_probe.size ? voice_probe.pcm[p]:0);
+                (elapsed>=voice_probe.prefix_ms && p<voice_probe.size ? voice_probe.pcm[p]:0);
         }
     }
     unsigned duration=(unsigned)(bytes/32);
